@@ -1,0 +1,107 @@
+# Financial Foundation Model Pretraining — Decoder-Only
+#
+# NeMo AutoModel configuration for pretraining a decoder foundation model on
+# financial transaction sequences using causal language modeling.
+#
+# Parameter count: ~29M
+
+# -- Model ----------------------------------------------------------------
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.LlamaConfig
+    vocab_size: 6251
+    hidden_size: 512
+    num_hidden_layers: 8
+    num_attention_heads: 8
+    num_key_value_heads: 2        # GQA: 4:1 ratio
+    intermediate_size: 1408       # SwiGLU FFN
+    max_position_embeddings: 8192 # RoPE allows extrapolation
+    rope_theta: 500000.0
+    hidden_act: silu
+    rms_norm_eps: 1.0e-5
+    attention_dropout: 0.0
+    tie_word_embeddings: false
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+
+# -- Training Dataset -----------------------------------------------------
+dataset:
+  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  data_path: null
+  merchant_hash_size: 2000
+  seq_length: 4096
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: torch.utils.data.default_collate
+
+# -- Validation Dataset ----------------------------------------------------
+validation_dataset:
+  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  data_path: null
+  merchant_hash_size: 2000
+  seq_length: 4096
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: torch.utils.data.default_collate
+
+# -- Training Schedule -----------------------------------------------------
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 16
+  ckpt_every_steps: 15
+  val_every_steps: 15
+  num_epochs: 20
+  max_steps: 3000
+
+# -- Distribution ----------------------------------------------------------
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+distributed:
+  _target_: nemo_automodel.components.distributed.fsdp2.FSDP2Manager
+  dp_size: none
+  dp_replicate_size: 1
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+
+# -- Loss ------------------------------------------------------------------
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# -- Optimizer -------------------------------------------------------------
+optimizer:
+  _target_: torch.optim.AdamW
+  betas: [0.9, 0.95]
+  lr: 0.0002
+  weight_decay: 0.077
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 10
+  min_lr: 0.0000065
+
+# -- RNG -------------------------------------------------------------------
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+# -- Checkpointing ---------------------------------------------------------
+checkpoint:
+  enabled: true
+  checkpoint_dir: "models/decoder-demo/checkpoints/"
+  model_save_format: safetensors
+  save_consolidated: true
+  model_repo_id: custom-financial-decoder
+
+# -- Paths ----------------------------------------------------------------
+paths:
+  pretrained_model: "models/decoder-foundation-model"
+  train_corpus: "data/decoder_corpus/train_corpus.txt"
+  val_corpus: "data/decoder_corpus/val_corpus.txt"

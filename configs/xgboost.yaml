@@ -1,0 +1,54 @@
+pca:
+  n_components: 64
+  random_state: 42
+
+xgboost:
+  device: "auto"  # auto / cuda / cpu
+
+  params_raw:
+    tree_method: "hist"
+    n_estimators: 400
+    max_depth: 8
+    learning_rate: 0.0023
+    colsample_bytree: 0.95
+    min_child_weight: 12
+    subsample: 0.673
+    reg_alpha: 0.01
+    reg_lambda: 0.001
+    random_state: 42
+
+  params_embed:
+    n_estimators: 435
+    max_depth: 12
+    learning_rate: 0.03774
+    colsample_bytree: 0.587
+    min_child_weight: 2.61
+    subsample: 0.569
+    reg_alpha: 0.01364
+    reg_lambda: 9.7e-05
+    gamma: 1.7
+    random_state: 42
+
+  params_combined:
+    n_estimators: 512
+    max_depth: 12
+    learning_rate: 0.00305
+    colsample_bytree: 0.768
+    min_child_weight: 25.85
+    subsample: 0.65
+    reg_alpha: 0.01
+    reg_lambda: 0.0001
+    gamma: 4.8
+    random_state: 42
+
+  train:
+    early_stopping_rounds: 20
+    eval_metric: "auc"
+    scale_pos_weight: 1.0
+
+inference:
+  batch_size: 1024
+  max_length: 128
+  pooling: "last_token"
+  embed_dir: "data/embeddings"
+  outputs_dir: "data/outputs"

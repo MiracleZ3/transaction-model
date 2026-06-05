@@ -1,0 +1,11 @@
+tokenizer:
+  merchant_hash_size: 2000
+  chunk_size: 315
+  context_window: 4096
+  tokens_per_txn: 12
+
+corpus:
+  output_dir: "data/decoder_corpus"
+  train: "data/decoder_corpus/train_corpus.txt"
+  val: "data/decoder_corpus/val_corpus.txt"
+  test: "data/decoder_corpus/test_corpus.txt"

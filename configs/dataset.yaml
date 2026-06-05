@@ -1,0 +1,32 @@
+# 数据集配置
+dataset:
+  download_url: "https://ibm.ent.box.com/index.php?rm=box_download_shared_file&shared_name=mhrtz6xiknblqznoi9h4f390scoqustt&file_id=f_770766751708"
+  raw_csv: "data/TabFormer/raw/card_transaction.v1.csv"
+  temporal_split_dir: "data/TabFormer/temporal_split"
+  val_eval: "data/TabFormer/temporal_split/val_eval.parquet"
+  test_eval: "data/TabFormer/temporal_split/test_eval.parquet"
+
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  # test_ratio 自动推断为 1 - train - val
+
+sampling:
+  balanced_train_size: 1000000
+  eval_samples: 100000
+  random_state: 42
+
+feature_cols:
+  - User
+  - Card
+  - Year
+  - Month
+  - Day
+  - Hour
+  - Amount
+  - Use Chip
+  - Merchant Name
+  - Merchant City
+  - Merchant State
+  - Zip
+  - MCC
