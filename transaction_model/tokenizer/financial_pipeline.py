@@ -23,8 +23,12 @@ Optional extensions (disabled by default to keep a 12-token baseline):
     - amount_strategy="quantile"  →  data-driven amount bins via cuML
     - include_time_delta=True     →  log-compressed inter-transaction time
 """
+from __future__ import annotations
 
-import cudf
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
 
 from .pipeline import TokenizerPipeline
 from .fixed_vocab import FixedVocabTokenizer
@@ -206,7 +210,7 @@ class FinancialTokenizerPipeline(TokenizerPipeline):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def preprocess(df: cudf.DataFrame) -> cudf.DataFrame:
+    def preprocess(df):
         """Normalize columns and derive intermediate fields expected by the
         pipeline steps.  Operates in-place on a cuDF DataFrame.
 
@@ -217,6 +221,11 @@ class FinancialTokenizerPipeline(TokenizerPipeline):
         month (numeric), chip_upper, zip3, state_clean, cust, and
         optionally time_delta_s.
         """
+        if cudf is None:
+            raise ImportError(
+                "FinancialTokenizerPipeline.preprocess requires the 'cudf' "
+                "package (GPU only). Install with: pip install cudf"
+            )
         df.columns = [c.strip().replace(" ", "_").lower() for c in df.columns]
 
         amt = df["amount"].astype(str).str.replace("$", "", regex=False)

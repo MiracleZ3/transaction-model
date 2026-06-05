@@ -22,9 +22,16 @@ fine-grained bins while large deltas (months) share coarser bins.
 
 Data is never stored in the constructor.
 """
+from __future__ import annotations
 
-import cudf
-import cupy as cp
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
+try:
+    import cupy as cp
+except ImportError:  # pragma: no cover - cuPy optional on CPU
+    cp = None  # type: ignore
 
 from .base import BaseTokenizer
 
@@ -48,6 +55,11 @@ class TimeDeltaTokenizer(BaseTokenizer):
         self.stream = stream
 
         self.max_horizon = int(max_years * _SECONDS_PER_JULIAN_YEAR)
+        if cp is None:
+            raise ImportError(
+                "TimeDeltaTokenizer requires the 'cupy' package "
+                "(GPU only). Install with: pip install cupy"
+            )
         log_max = cp.log(float(self.max_horizon) + 1.0)
         self.boundaries = cp.linspace(0, log_max, self.num_bins + 1)
         self._vocab_built = False

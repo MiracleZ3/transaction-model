@@ -44,6 +44,7 @@ NeMo AutoModel resolves the ``_target_``, calls ``build_financial_clm_dataset()`
 with the remaining keys as kwargs, and wraps the returned Dataset in a
 ``StatefulDataLoader``.
 """
+from __future__ import annotations
 
 import sys
 from pathlib import Path

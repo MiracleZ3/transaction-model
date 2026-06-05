@@ -3,7 +3,7 @@ torch>=2.1
 transformers>=4.40
 datasets>=2.14
 
-# GPU 加速 (可选，无 GPU 时跳过)
+# GPU 加速 (可选，无 GPU 时跳过；tokenizer Step 2/4 强依赖 cudf/cupy)
 # cudf>=24.0
 # cuml>=24.0
 # cupy>=13.0
@@ -15,6 +15,7 @@ scikit-learn>=1.3
 # 数据处理
 pandas>=2.1
 numpy>=1.24
+pyarrow>=14.0            # parquet 读写引擎
 
 # 可视化
 matplotlib>=3.7
@@ -24,8 +25,8 @@ plotly>=5.18
 # 训练框架 (NeMo AutoModel, 可选)
 # nemo-automodel>=0.1
 # liger-kernel
+# torchdata>=0.7            # NeMo 调用的 StatefulDataLoader
 
 # 工具
 pyyaml>=6.0
 tqdm>=4.65
-ipywidgets>=8.0

@@ -13,16 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Abstract base class for modular tokenizer steps.
+"""Abstract base class for modular tokenizer steps.
 
 Each tokenizer handles one or more DataFrame columns, converting raw values
 into token strings (e.g. "AMT_3", "MERCH_1181").  Configuration lives in
 __init__; data flows only through build_vocab() and tokenize().
 """
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import cudf
+
+# GPU-only deps: import lazily so that the package stays importable on CPU.
+# Operations that need cuDF will raise a clear error at call time if missing.
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
 
 
 class BaseTokenizer(ABC):
@@ -46,7 +52,8 @@ class BaseTokenizer(ABC):
     def vocab(self) -> dict:
         """token_string -> local_index mapping (built lazily from idx_to_token)."""
         if self._vocab is None and self._idx_to_token is not None:
-            if isinstance(next(iter(self._idx_to_token.values())), dict):
+            first = next(iter(self._idx_to_token.values()), None)
+            if isinstance(first, dict):
                 self._vocab = {
                     outer_key: {v: k for k, v in inner_dict.items()}
                     for outer_key, inner_dict in self._idx_to_token.items()
@@ -79,7 +86,7 @@ class BaseTokenizer(ABC):
         for fixed-vocab tokenizers) or from data passed to fit()."""
 
     @abstractmethod
-    def tokenize(self, column_data) -> cudf.Series:
+    def tokenize(self, column_data):
         """Map column values to token strings."""
 
     # ------------------------------------------------------------------

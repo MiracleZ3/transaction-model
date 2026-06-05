@@ -29,6 +29,8 @@ def train_xgb_model(
     X_test, y_test,
     params: dict,
     name: str = "Model",
+    early_stopping_rounds: int | None = None,
+    eval_metric: str = "auc",
 ) -> tuple:
     """训练单个 XGBoost 模型
 
@@ -38,6 +40,8 @@ def train_xgb_model(
         X_test, y_test: 测试数据和标签
         params: XGBoost 超参数
         name: 模型名称
+        early_stopping_rounds: 早停轮数 (None 表示不启用)
+        eval_metric: 早停监控指标
 
     Returns:
         (model, metrics_dict) 元组
@@ -45,17 +49,22 @@ def train_xgb_model(
     device = get_device()
     print(f"\nTraining {name}...")
     print(f"  Features: {X_train.shape[1]}d | Samples: {X_train.shape[0]:,}")
+    if early_stopping_rounds is None:
+        print("  Early stopping: disabled")
 
     t0 = time.time()
     clf = xgb.XGBClassifier(
         **params,
         device=device,
     )
-    clf.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=False,
-    )
+    fit_kwargs: dict = {
+        "eval_set": [(X_val, y_val)],
+        "verbose": False,
+    }
+    if early_stopping_rounds is not None:
+        fit_kwargs["early_stopping_rounds"] = early_stopping_rounds
+        fit_kwargs["eval_metric"] = eval_metric
+    clf.fit(X_train, y_train, **fit_kwargs)
     train_time = time.time() - t0
 
     val_preds = clf.predict_proba(X_val)[:, 1]
@@ -64,7 +73,8 @@ def train_xgb_model(
     test_preds = clf.predict_proba(X_test)[:, 1]
     test_metrics = compute_metrics(y_test, test_preds)
 
-    print(f"  Train time: {train_time:.1f}s (best_iteration={clf.best_iteration})")
+    best_iter = clf.best_iteration if clf.best_iteration is not None else "n/a"
+    print(f"  Train time: {train_time:.1f}s (best_iteration={best_iter})")
     print(f"  Val  ROC-AUC: {val_metrics['auc']:.4f} | AP: {val_metrics['ap']:.4f}")
     print(f"  Test ROC-AUC: {test_metrics['auc']:.4f} | AP: {test_metrics['ap']:.4f}")
 
@@ -231,6 +241,10 @@ def run_three_model_comparison(
 
     n_raw = X_train_enc.shape[1]
 
+    train_cfg = cfg.get("xgboost", {}).get("train", {})
+    early_stopping = train_cfg.get("early_stopping_rounds")
+    eval_metric = train_cfg.get("eval_metric", "auc")
+
     # 5. 训练三个模型
     print("\n" + "=" * 60)
     print("Training XGBoost Models (HPO-optimized params)")
@@ -241,6 +255,8 @@ def run_three_model_comparison(
         X_train_enc, y_train, X_val_enc, y_val, X_test_enc, y_test,
         params=cfg["xgboost"]["params_raw"],
         name=f"Raw Features ({n_raw}d)",
+        early_stopping_rounds=early_stopping,
+        eval_metric=eval_metric,
     )
 
     # [2/3] Embeddings
@@ -248,6 +264,8 @@ def run_three_model_comparison(
         train_pca, y_train, val_pca, y_val, test_pca, y_test,
         params=cfg["xgboost"]["params_embed"],
         name=f"Embeddings ({pca_dim}d PCA)",
+        early_stopping_rounds=early_stopping,
+        eval_metric=eval_metric,
     )
 
     # [3/3] Combined
@@ -258,6 +276,8 @@ def run_three_model_comparison(
         X_train_combined, y_train, X_val_combined, y_val, X_test_combined, y_test,
         params=cfg["xgboost"]["params_combined"],
         name=f"Combined ({X_train_combined.shape[1]}d)",
+        early_stopping_rounds=early_stopping,
+        eval_metric=eval_metric,
     )
 
     # 6. 结果汇总

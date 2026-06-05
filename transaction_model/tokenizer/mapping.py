@@ -25,11 +25,18 @@ Supports three modes to cover different field types:
 
 Data is never stored in the constructor.
 """
+from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-import cudf
-import cupy as cp
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
+try:
+    import cupy as cp  # noqa: F401 - cuPy optional on CPU
+except ImportError:  # pragma: no cover
+    cp = None  # type: ignore
 import numpy as np
 
 from .base import BaseTokenizer

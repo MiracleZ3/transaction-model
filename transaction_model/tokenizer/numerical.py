@@ -22,10 +22,20 @@ continuous values to ordinal bin tokens like "AMT_0" .. "AMT_9".
 Data is passed only to build_vocab() (fit) and tokenize() (transform),
 never stored in the constructor.
 """
+from __future__ import annotations
 
-import cudf
-import cupy as cp
-from cuml.preprocessing import KBinsDiscretizer
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
+try:
+    import cupy as cp  # noqa: F401 - cuPy optional on CPU
+except ImportError:  # pragma: no cover
+    cp = None  # type: ignore
+try:
+    from cuml.preprocessing import KBinsDiscretizer  # type: ignore
+except ImportError:  # pragma: no cover - cuML only available on GPU
+    KBinsDiscretizer = None  # type: ignore
 
 from .base import BaseTokenizer
 
@@ -46,6 +56,11 @@ class NumericalTokenizerOptBin(BaseTokenizer):
         self.strategy = strategy
         self.stream = stream
         self._vocab_built = False
+        if KBinsDiscretizer is None:
+            raise ImportError(
+                "NumericalTokenizerOptBin requires the 'cuml' package "
+                "(GPU only). Install with: pip install cuml"
+            )
         self.builder = KBinsDiscretizer(
             n_bins=self.num_bins, encode="ordinal", strategy=self.strategy
         )

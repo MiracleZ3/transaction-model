@@ -325,13 +325,16 @@ print(f"Vocab size: {tokenizer.get_vocab_size()}")
 
 ## GPU / CPU 自适应
 
-所有模块均支持无 GPU 环境运行:
+| 步骤 | CPU | GPU | 说明 |
+|------|-----|-----|------|
+| Step 1 数据基线 | ✅ | ✅ 自动 cuDF 加速 | XGBoost 自动选 cuda/cpu |
+| Step 2 语料生成 | ❌ | ✅ **必需 cuDF** | `FinancialTokenizerPipeline.preprocess` 使用 cuDF 字符串/日期/hash |
+| Step 3 模型训练 | ❌ | ✅ **必需 CUDA** | NeMo AutoModel + FSDP2 |
+| Step 4 嵌入提取 | ❌ | ✅ **必需 cuDF + CUDA** | 复用 Step 2 的 tokenizer + GPU 模型推理 |
+| Step 5 欺诈检测 | ✅ | ✅ 自动 | XGBoost 自动检测 cuda |
+| 可视化 | ✅ | ✅ 可选 cuML | UMAP 优先 cuML，自动回退 sklearn |
 
-- **数据加载**: 优先 cuDF (GPU)，自动回退 pandas (CPU)
-- **UMAP**: 优先 cuML (GPU)，自动回退 sklearn (CPU)
-- **训练/推理**: 需要 PyTorch + CUDA
-- **XGBoost**: 自动检测 CUDA 可用性，CPU 也可运行
-- **可视化**: 纯 matplotlib/plotly，无需 GPU
+**摘要**: CPU 环境可以运行 Step 1 / Step 5 / 可视化；任何涉及 tokenizer 与 decoder 模型的步骤都需要 GPU。在仅 CPU 的开发机上能 `import transaction_model.tokenizer`（不会抛 `ImportError`），但调用 `preprocess` / `transform` 会抛 `ImportError` 报告缺失的 GPU 库。
 
 ## 开发
 

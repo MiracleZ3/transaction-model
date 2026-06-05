@@ -106,10 +106,13 @@ def main():
         X_train_enc, X_val_enc, X_test_enc, _ = encode_categorical(X_train, X_val, X_test)
 
         xgb_cfg = load_config("xgboost")
+        xgb_train_cfg = xgb_cfg.get("xgboost", {}).get("train", {})
         clf, metrics = train_xgb_model(
             X_train_enc, y_train, X_val_enc, y_val, X_test_enc, y_test,
             params=xgb_cfg["xgboost"]["params_raw"],
             name="XGBoost Baseline",
+            early_stopping_rounds=xgb_train_cfg.get("early_stopping_rounds"),
+            eval_metric=xgb_train_cfg.get("eval_metric", "auc"),
         )
         print("\nStep 01 complete!")
 

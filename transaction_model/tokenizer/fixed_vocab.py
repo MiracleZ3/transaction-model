@@ -23,9 +23,16 @@ determined by (prefix, min_val, max_val, pad_width).
 Used for: HOUR (0-23), DOW (0-6), MONTH (1-12), CARD (0-9),
           ZIP3 (0-999), CUST (0-2999).
 """
+from __future__ import annotations
 
-import cudf
-import cupy as cp
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
+try:
+    import cupy as cp  # noqa: F401 - typed in stream parameter; cuPy optional on CPU
+except ImportError:  # pragma: no cover
+    cp = None  # type: ignore
 
 from .base import BaseTokenizer
 

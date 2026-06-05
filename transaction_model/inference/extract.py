@@ -171,13 +171,25 @@ def extract_all_embeddings(
 
     inf_cfg = cfg["inference"]
     ds_cfg = load_config("dataset")["dataset"]
+    tok_cfg = load_config("tokenizer")["tokenizer"]
+    sampling_cfg = load_config("dataset")["sampling"]
 
     model_dir = resolve_path(train_cfg["paths"]["pretrained_model"])
     embed_dir = resolve_path(inf_cfg["embed_dir"])
     embed_dir.mkdir(parents=True, exist_ok=True)
 
-    assert model_dir.exists() and (model_dir / "config.json").exists(), \
-        f"Decoder checkpoint not found at {model_dir}"
+    if not model_dir.exists():
+        raise FileNotFoundError(
+            f"Decoder model directory not found: {model_dir}. "
+            f"Place a HF compatible checkpoint there or update "
+            f"configs/{training_config_name}.yaml paths.pretrained_model."
+        )
+    if not (model_dir / "config.json").exists():
+        raise FileNotFoundError(
+            f"HuggingFace config.json not found inside {model_dir}. "
+            f"Expected a model directory containing config.json + "
+            f"safetensors/pytorch_model weights."
+        )
 
     split_to_parquet = {
         "train": resolve_path(ds_cfg["temporal_split_dir"]) / "train.parquet",
@@ -195,10 +207,10 @@ def extract_all_embeddings(
             parquet_path=split_to_parquet[split],
             model_dir=model_dir,
             embed_dir=embed_dir,
-            merchant_hash_size=load_config("tokenizer")["tokenizer"]["merchant_hash_size"],
+            merchant_hash_size=tok_cfg["merchant_hash_size"],
             batch_size=inf_cfg["batch_size"],
             max_length=inf_cfg["max_length"],
-            balanced_train_size=load_config("dataset")["sampling"]["balanced_train_size"],
+            balanced_train_size=sampling_cfg["balanced_train_size"],
             force=force,
         )
         all_embeddings.append(emb)

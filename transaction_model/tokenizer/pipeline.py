@@ -23,11 +23,18 @@ Special tokens: <bos> / <eos> / <sep> / <pad> / <unk>
 Default chunk_size: ~315 transactions for a 4096-token context window.
 Sequence format: "<bos> txn1 <sep> txn2 <sep> ... txnN <eos>"
 """
+from __future__ import annotations
 
 from typing import Dict, List, Optional, Union
 
-import cudf
-import cupy as cp
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
+try:
+    import cupy as cp  # type: ignore
+except ImportError:  # pragma: no cover - cuPy optional on CPU
+    cp = None  # type: ignore
 import numpy as np
 
 from .base import BaseTokenizer
@@ -92,7 +99,12 @@ class TokenizerPipeline:
     # Fit
     # ------------------------------------------------------------------
 
-    def fit(self, df: cudf.DataFrame) -> "TokenizerPipeline":
+    def fit(self, df) -> "TokenizerPipeline":
+        if cudf is None:
+            raise ImportError(
+                "TokenizerPipeline.fit requires 'cudf' "
+                "(GPU only). Install with: pip install cudf"
+            )
         if self.use_streams and len(self.steps) >= self.stream_threshold:
             self._fit_parallel(df)
         else:
@@ -129,7 +141,13 @@ class TokenizerPipeline:
 
         self.global_vocab_size = current_offset
 
-    def _fit_parallel(self, df: cudf.DataFrame) -> None:
+    def _fit_parallel(self, df) -> None:
+        if cp is None:
+            raise ImportError(
+                "_fit_parallel (parallel fit over streams) requires "
+                "'cupy' (GPU only). Falling back to sequential fit by "
+                "initialising the pipeline with use_streams=False."
+            )
         streams = [
             cp.cuda.Stream(non_blocking=True) for _ in self.tokenizer_order
         ]
@@ -220,9 +238,14 @@ class TokenizerPipeline:
     # Transform  ->  DataFrame of token strings
     # ------------------------------------------------------------------
 
-    def transform(self, df: cudf.DataFrame) -> cudf.DataFrame:
+    def transform(self, df) -> "cudf.DataFrame":
         if not self.is_fitted:
             raise ValueError("Must call fit() before transform()")
+        if cudf is None:
+            raise ImportError(
+                "TokenizerPipeline.transform requires 'cudf' "
+                "(GPU only). Install with: pip install cudf"
+            )
 
         local_results = {}
         if self.use_streams and len(self.steps) >= self.stream_threshold:

@@ -42,7 +42,8 @@ def generate_corpus(
     parquet_path = Path(parquet_path)
 
     if corpus_path.exists() and not force:
-        n_lines = sum(1 for _ in open(corpus_path))
+        with open(corpus_path) as f:
+            n_lines = sum(1 for _ in f)
         print(f"[{split_name}] Corpus already exists: {n_lines:,} sequences")
         with open(corpus_path) as f:
             return [line.strip() for line in f if line.strip()]
@@ -74,7 +75,9 @@ def generate_corpus(
         group_cols = [gdf_proc.columns[0]]
 
     print(f"  Grouping by: {group_cols}")
-    print(f"  Chunk size: {chunk_size} transactions (~{chunk_size * 13} tokens)")
+    n_tokens_per_txn = 12
+    print(f"  Chunk size: {chunk_size} transactions "
+          f"(~{chunk_size * n_tokens_per_txn} txn tokens + {chunk_size - 1} <sep>'s)")
 
     corpus_lines = pip.to_corpus_lines(
         token_df, gdf_proc, group_cols, chunk_size=chunk_size

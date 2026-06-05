@@ -22,9 +22,16 @@ integers before calling tokenize() (e.g. cudf.Series.hash_values()).
 
 Data is never stored in the constructor.
 """
+from __future__ import annotations
 
-import cudf
-import cupy as cp
+try:
+    import cudf  # type: ignore
+except ImportError:  # pragma: no cover - depends on environment
+    cudf = None  # type: ignore
+try:
+    import cupy as cp  # noqa: F401 - cuPy optional on CPU
+except ImportError:  # pragma: no cover
+    cp = None  # type: ignore
 
 from .base import BaseTokenizer
 
