@@ -38,3 +38,10 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 升级方案稿（本地保留但不提交；方案落实后已升格为正式代码则可显式 git add -f）
+upgrade/
+
+# Docker 本地环境
+.env
+docker-compose.override.yml

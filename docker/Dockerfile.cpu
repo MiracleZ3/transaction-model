@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.6
+# docker/Dockerfile.cpu
+#
+# CPU 镜像：Step 1 数据基线 / Step 5 欺诈检测 / 测试 / 可视化。
+# 继承 tm-base，仅新增 entrypoint。
+#
+# 构建：
+#   docker build -f docker/Dockerfile.cpu -t tm-cpu:latest \
+#       --build-arg REGISTRY=local --build-arg TAG=latest .
+
+ARG REGISTRY=local
+ARG TAG=latest
+FROM ${REGISTRY}/tm-base:${TAG}
+
+LABEL org.opencontainers.image.title="transaction-model/cpu"
+
+USER root
+COPY --chown=appuser:appuser docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=appuser:appuser docker/healthcheck.py /workspace/docker/healthcheck.py
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER appuser
+WORKDIR /workspace
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+    CMD python /workspace/docker/healthcheck.py || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["--help"]

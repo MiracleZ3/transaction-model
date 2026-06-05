@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1.6
+# docker/Dockerfile.base
+#
+# 共享基础层：Python 3.11 + 项目源码 + CPU 依赖。
+# 这个镜像不直接运行，只是给 cpu/gpu 镜像做公共 base。
+#
+# 构建：
+#   docker build -f docker/Dockerfile.base -t tm-base:latest .
+
+ARG PYTHON_VERSION=3.11
+
+FROM python:${PYTHON_VERSION}-slim AS base
+
+LABEL org.opencontainers.image.title="transaction-model/base"
+LABEL org.opencontainers.image.source="https://github.com/MiracleZ3/transaction-model"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# 系统依赖：build-essential 给 C 扩展，ca-certificates / git / tzdata
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        git \
+        tzdata \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+WORKDIR /workspace
+
+# 1) 先 COPY 依赖描述符（变更频率低）
+COPY pyproject.toml requirements.txt ./
+
+# 2) 安装 CPU 依赖（base 只装 dev 不装 gpu/nemo；扩展镜像按需追加）
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -e ".[dev]"
+
+# 3) 创建非 root 用户 (uid=1000，与大多数 Linux 宿主用户对齐)
+RUN useradd --create-home --shell /bin/bash --uid 1000 appuser && \
+    chown -R appuser:appuser /workspace
+USER appuser
+
+# 4) 复制项目代码（最后一步，代码变动不触发依赖重装）
+COPY --chown=appuser:appuser . /workspace
+
+CMD ["python3"]

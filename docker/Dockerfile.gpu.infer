@@ -1,0 +1,76 @@
+# syntax=docker/dockerfile:1.6
+# docker/Dockerfile.gpu.infer
+#
+# GPU 推理镜像：CUDA + cuDF + transformers，无 cuML / NeMo。
+# 覆盖 Step 4 (extract embeddings)。
+#
+# 构建：
+#   docker build -f docker/Dockerfile.gpu.infer -t tm-gpu-infer:latest .
+
+ARG CUDA_VERSION=12.4.0
+ARG UBUNTU_VERSION=22.04
+ARG PYTHON_VERSION=3.11
+ARG RAPIDS_VERSION=24.10
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS cuda
+
+FROM python:${PYTHON_VERSION}-slim
+
+LABEL org.opencontainers.image.title="transaction-model/gpu-infer"
+LABEL org.opencontainers.image.description="CUDA + cuDF for embedding extraction (Step 4)"
+
+COPY --from=cuda /usr/local/cuda /usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        git \
+        tzdata \
+        curl \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai
+
+WORKDIR /workspace
+
+COPY pyproject.toml requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -e ".[dev]"
+
+# 推理只需 cuDF + cuPy（不要 cuML、NeMo → 节省 ~2 GB）
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --extra-index-url https://pypi.nvidia.com \
+        "cudf-cu12==${RAPIDS_VERSION}.*" \
+        "cupy-cuda12x>=13.0"
+
+RUN useradd --create-home --shell /bin/bash --uid 1000 appuser && \
+    chown -R appuser:appuser /workspace
+USER appuser
+
+COPY --chown=appuser:appuser . /workspace
+
+USER root
+COPY --chown=appuser:appuser docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=appuser:appuser docker/healthcheck.py /workspace/docker/healthcheck.py
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER appuser
+WORKDIR /workspace
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+    CMD python /workspace/docker/healthcheck.py || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["--help"]

@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.6
+# docker/Dockerfile.gpu.train
+#
+# GPU 训练镜像：CUDA + cuDF/cuML/cuPy + NeMo AutoModel。
+# 覆盖 Step 2 (tokenize) 和 Step 3 (train)。
+#
+# 构建（需宿主有 nvidia-container-toolkit）：
+#   docker build -f docker/Dockerfile.gpu.train -t tm-gpu-train:latest .
+
+ARG CUDA_VERSION=12.4.0
+ARG UBUNTU_VERSION=22.04
+ARG PYTHON_VERSION=3.11
+ARG RAPIDS_VERSION=24.10
+
+# Stage 1: 仅取 CUDA runtime libs（节省 ~3 GB）
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS cuda
+
+# Stage 2: 真实的 Python 镜像
+FROM python:${PYTHON_VERSION}-slim
+
+LABEL org.opencontainers.image.title="transaction-model/gpu-train"
+LABEL org.opencontainers.image.description="CUDA + RAPIDS + NeMo for Step 2/3"
+
+# 复用 CUDA 库
+COPY --from=cuda /usr/local/cuda /usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# 系统依赖
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        git \
+        tzdata \
+        curl \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai
+
+WORKDIR /workspace
+
+# 安装 CPU 依赖
+COPY pyproject.toml requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -e ".[dev]"
+
+# 安装 RAPIDS (cuDF/cuML/cuPy) - 仅 cu12 wheel
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --extra-index-url https://pypi.nvidia.com \
+        "cudf-cu12==${RAPIDS_VERSION}.*" \
+        "cuml-cu12==${RAPIDS_VERSION}.*" \
+        "cupy-cuda12x>=13.0"
+
+# 安装 NeMo 训练框架
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e ".[nemo]"
+
+# 非 root 用户
+RUN useradd --create-home --shell /bin/bash --uid 1000 appuser && \
+    chown -R appuser:appuser /workspace
+USER appuser
+
+# 复制项目代码
+COPY --chown=appuser:appuser . /workspace
+
+# 入口
+USER root
+COPY --chown=appuser:appuser docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=appuser:appuser docker/healthcheck.py /workspace/docker/healthcheck.py
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER appuser
+WORKDIR /workspace
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+    CMD python /workspace/docker/healthcheck.py || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["--help"]

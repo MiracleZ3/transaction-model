@@ -1,0 +1,78 @@
+# 构建 context 排除清单：让 docker build 只发送必要文件
+# 不排除会让 build context 巨大、效率低，还可能把数据/秘钥打进去
+
+# ─── Git / CI ──────────────────────────────────────
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# ─── 数据与模型（必须排除；通过 volume 挂入） ──────
+data/
+models/
+
+# ─── Python 产物 ───────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ─── 虚拟环境 ──────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Jupyter ───────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─── IDE / OS ──────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ─── 构建产物 ──────────────────────────────────────
+build/
+dist/
+
+# ─── 个人 / 本地文件 ───────────────────────────────
+*.local.*
+*.local
+secrets/
+.env
+.env.local
+.envrc
+private/
+
+# ─── 升级方案稿（不打入镜像） ──────────────────────
+upgrade/
+
+# ─── 文档（少打一些；只保留 README 与必要 docs） ──
+*.md
+!README.md
+!How_To_Use.md
+!CONVENTIONS.md
+
+# ─── Docker 自身（避免循环） ───────────────────────
+Dockerfile*
+docker-compose*.yml
+!docker/
+
+# ─── 临时 ──────────────────────────────────────────
+*.log
+tmp/
+.tmp/

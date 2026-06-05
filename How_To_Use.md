@@ -19,6 +19,7 @@
 9. [一键全流程](#9-一键全流程)
 10. [常见问题与故障排查](#10-常见问题与故障排查)
 11. [清理与重置](#11-清理与重置)
+12. [在容器中运行](#12-在容器中运行)
 
 ---
 
@@ -570,6 +571,133 @@ rm -rf data/decoder_corpus/ models/decoder-demo/
 python scripts/step_02_tokenize_corpus.py --force
 python scripts/step_03_train_model.py --demo    # 先试 30 步看 loss
 python scripts/run_pipeline.py --steps extract,detect --force
+```
+
+---
+
+## 12. 在容器中运行
+
+本节介绍如何用 `docker` / `docker compose` 运行整个 pipeline。**容器化方案不需要在宿主机装任何 Python 依赖**，仅需 Docker 24+（GPU 需要 `nvidia-container-toolkit`）。
+
+### 12.1 三个镜像
+
+| 镜像 | 体积 | 用途 | Dockerfile |
+|------|------|------|------------|
+| `tm-base` | ~800 MB | 共享层（不直接 run） | `docker/Dockerfile.base` |
+| `tm-cpu` | ~1.2 GB | Step 1 / Step 5 / 测试 / 可视化 | `docker/Dockerfile.cpu` |
+| `tm-gpu-train` | ~10 GB | Step 2 (tokenize) + Step 3 (train) | `docker/Dockerfile.gpu.train` |
+| `tm-gpu-infer` | ~8 GB | Step 4 (extract) | `docker/Dockerfile.gpu.infer` |
+
+构建产物通过 `./data` / `./models` volume 持久化，镜像内**不打包数据/模型**。
+
+### 12.2 镜像构建
+
+```bash
+# CPU 镜像（最常用，无 NVIDIA 依赖）
+make docker-build-cpu
+
+# 拉满 4 个镜像（含 GPU），需 nvidia-container-toolkit
+make docker-build
+
+# 指定 tag（用 git sha，CI 友好）
+make docker-build-cpu DOCKER_TAG=$(git rev-parse --short HEAD)
+
+# 推送到远程（必须设置非 local 的 DOCKER_REG）
+make docker-push DOCKER_REG=ghcr.io/miraclez3 DOCKER_TAG=v1.0
+```
+
+### 12.3 单步运行（docker compose）
+
+`docker-compose.yml` 通过 `profile` 隔离不同任务，一条命令只起一个 service：
+
+| Profile | 镜像 | 命令 |
+|---------|------|------|
+| `data` | tm-cpu | `make compose-data` |
+| `detect` | tm-cpu | `make compose-detect` |
+| `test` | tm-cpu | `make compose-test` |
+| `cpu-pipeline` | tm-cpu | `make compose-cpu-pipeline` |
+| `tokenize` | tm-gpu-train | `make compose-tokenize` |
+| `train` | tm-gpu-train | `TRAIN_NUM_GPUS=8 make compose-train` |
+| `extract` | tm-gpu-infer | `make compose-extract` |
+| `all` | tm-gpu-train | `make compose-all` |
+
+**示例 1：在 CPU 上跑 Step 5（fraud detection）**
+```bash
+make compose-detect
+```
+
+**示例 2：8 GPU 全量训练**
+```bash
+TRAIN_NUM_GPUS=8 make compose-train
+```
+
+**示例 3：运行 pytest**
+```bash
+make compose-test
+```
+
+### 12.4 直接 `docker run`
+
+如果不想经过 compose：
+
+```bash
+# 查看 entrypoint 帮助
+docker run --rm local/tm-cpu:latest --help
+
+# Step 1（CPU）
+docker run --rm \
+    -v $(pwd)/data:/workspace/data \
+    local/tm-cpu:latest data --skip-download
+
+# Step 3 demo 训练（GPU，1 卡）
+docker run --rm --gpus all \
+    -v $(pwd)/data:/workspace/data \
+    -v $(pwd)/models:/workspace/models \
+    local/tm-gpu-train:latest train --demo
+
+# 进入 shell 调试
+docker run --rm -it \
+    -v $(pwd)/data:/workspace/data \
+    -v $(pwd)/models:/workspace/models \
+    local/tm-cpu:latest bash
+```
+
+### 12.5 开发模式：把宿主源码挂入容器
+
+复用 `docker-compose.override.yml.example`，无须改 `docker-compose.yml`：
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+make compose-test    # 此时会用宿主机 ./transaction_model/ 代码
+```
+
+### 12.6 健康检查
+
+每次容器启动 30s 后会跑 `docker/healthcheck.py`：
+
+```bash
+docker inspect --format='{{.State.Health.Status}}' <container_id>
+# → healthy / unhealthy / starting
+```
+
+### 12.7 容器化场景的 §8 决策树变体
+
+容器场景的"是否需要重训"判断与 [§8](#8-是否需要重新预训练决策树) 完全一致，但执行命令替换如下：
+
+| 原生命令 | 容器命令 |
+|---------|---------|
+| `python scripts/step_03_train_model.py --demo` | `make compose-train -- --demo` * |
+| `torchrun --nproc-per-node=8 ...` | `TRAIN_NUM_GPUS=8 make compose-train` |
+| `python scripts/step_04_extract_embeddings.py --force` | `make compose-extract -- --force` |
+
+*注意：`make compose-train -- --demo` 这种透传需通过 `.env` 的 `TRAIN_EXTRA_ARGS=--demo` 实现（compose 模板已留位置）。更直接的方式是 `docker run ... tm-gpu-train train --demo`。
+
+### 12.8 清理
+
+```bash
+make compose-down          # 停掉所有本项目的容器
+make docker-clean          # 删本项目的 4 个镜像
+docker system prune        # 系统级清理（小心）
 ```
 
 ---

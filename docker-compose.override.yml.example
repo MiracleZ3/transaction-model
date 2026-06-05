@@ -1,0 +1,64 @@
+# docker-compose.override.yml.example
+#
+# 复制到 docker-compose.override.yml 即可启用开发模式。
+# 主要差异：把项目目录 bind-mount 进去，让代码改动立即生效。
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# 然后 docker compose --profile test up 会自动合并 override。
+
+version: "3.9"
+
+# 对所有 service 生效：在 volumes 里追加源码挂载
+x-dev-volumes:
+  &dev-volumes
+  - ./:/workspace
+
+services:
+  cpu-data:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  cpu-detect:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  cpu-test:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  cpu-pipeline:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  gpu-tokenize:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  gpu-train:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  gpu-extract:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace
+
+  gpu-all:
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./:/workspace

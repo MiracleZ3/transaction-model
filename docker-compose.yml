@@ -1,0 +1,135 @@
+# docker-compose.yml
+#
+# 用 profile 控制启动哪些 service；同一时刻一般只活跃一个。
+# 用法：
+#   docker compose --profile data up               # 跑 Step 1 数据基线
+#   docker compose --profile detect up             # 跑 Step 5 欺诈检测
+#   TRAIN_NUM_GPUS=8 docker compose --profile train up
+#   docker compose --profile cpu-pipeline up       # CPU 端到端 (data + detect)
+
+version: "3.9"
+
+x-common-env: &common-env
+  PYTHONUNBUFFERED: "1"
+  TZ: "Asia/Shanghai"
+  # 这两个变量让 RAPIDS / PyTorch 能正确发现 GPU；不设也安全（CPU service 不会用）
+  NVIDIA_VISIBLE_DEVICES: "all"
+  NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+
+x-common-volumes: &common-volumes
+  # 数据：宿主 ↔ 容器共享（所有 split、corpus、embedding、output 都在这下面）
+  - ./data:/workspace/data
+  # 模型 checkpoint
+  - ./models:/workspace/models
+  # 嵌入与图表（已经在 ./data/outputs/ 下，可省；单独列方便备份）
+  # 代码默认不挂（用镜像内打包的版本）；要 dev 模式编辑源码，复制 override 模板：
+  #   cp docker-compose.override.yml.example docker-compose.override.yml
+
+x-common-restart: &common-restart
+  # pipeline 类任务跑完即退；不建议常驻
+  restart: "no"
+
+services:
+  # ─── CPU 模式 ─────────────────────────────────────────────────────
+  cpu-data:
+    image: ${DOCKER_REGISTRY:-local}/tm-cpu:${DOCKER_TAG:-latest}
+    profiles: ["data"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    command: ["data"]
+
+  cpu-detect:
+    image: ${DOCKER_REGISTRY:-local}/tm-cpu:${DOCKER_TAG:-latest}
+    profiles: ["detect"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    command: ["detect"]
+
+  cpu-test:
+    image: ${DOCKER_REGISTRY:-local}/tm-cpu:${DOCKER_TAG:-latest}
+    profiles: ["test"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    command: ["test"]
+
+  cpu-pipeline:
+    image: ${DOCKER_REGISTRY:-local}/tm-cpu:${DOCKER_TAG:-latest}
+    profiles: ["cpu-pipeline"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    command: ["pipeline", "--steps", "data,detect"]
+
+  # ─── GPU 训练模式 ─────────────────────────────────────────────────
+  gpu-tokenize:
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu-train:${DOCKER_TAG:-latest}
+    profiles: ["tokenize"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["tokenize"]
+
+  gpu-train:
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu-train:${DOCKER_TAG:-latest}
+    profiles: ["train"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    shm_size: "16gb"                   # FSDP2 NCCL 需要大 shm
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${TRAIN_NUM_GPUS:-1}
+              capabilities: [gpu]
+    command: ["train", "--nproc", "${TRAIN_NUM_GPUS:-1}"]
+
+  # ─── GPU 推理 ─────────────────────────────────────────────────────
+  gpu-extract:
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu-infer:${DOCKER_TAG:-latest}
+    profiles: ["extract"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["extract"]
+
+  # ─── 一键全流程（GPU） ───────────────────────────────────────────
+  gpu-all:
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu-train:${DOCKER_TAG:-latest}
+    profiles: ["all"]
+    environment: *common-env
+    volumes: *common-volumes
+    restart: *common-restart
+    shm_size: "16gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${TRAIN_NUM_GPUS:-1}
+              capabilities: [gpu]
+    command: ["pipeline", "--steps", "all"]

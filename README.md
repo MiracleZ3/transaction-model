@@ -92,6 +92,39 @@ pip install -e ".[gpu]"
 pip install -e ".[nemo]"
 ```
 
+### Docker（推荐用于跨机器一致性）
+
+```bash
+# ─── CPU 镜像（开发机或无 NVIDIA 驱动的服务器） ───
+make docker-build-cpu          # ~3 min, 1.2 GB
+
+# ─── GPU 镜像（需要 nvidia-container-toolkit） ───
+make docker-build              # ~15 min, 三个镜像共 ~20 GB
+
+# ─── 单步运行（CPU） ───
+make compose-test              # pytest
+make compose-data              # Step 1: 数据基线（首次需下载数据）
+make compose-detect            # Step 5: 欺诈检测
+
+# ─── 单步运行（GPU） ───
+make compose-tokenize          # Step 2
+make compose-train             # Step 3 (TRAIN_NUM_GPUS=8 可覆盖)
+make compose-extract           # Step 4
+
+# ─── 端到端 ───
+make compose-cpu-pipeline      # CPU: data + detect
+make compose-all               # GPU 全流程
+
+# ─── 直接 docker run ───
+docker run --rm local/tm-cpu:latest --help
+docker run --rm --gpus all \
+    -v $(pwd)/data:/workspace/data \
+    -v $(pwd)/models:/workspace/models \
+    local/tm-gpu-train:latest train --demo
+```
+
+完整的镜像/Compose 设计参见 [`docker/`](docker/) 与 [`How_To_Use.md`](How_To_Use.md) §12。
+
 ### 使用预训练模型运行完整流程
 
 ```bash
