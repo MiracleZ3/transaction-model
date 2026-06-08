@@ -57,13 +57,23 @@ transaction-model/
 │       └── results_viz.py          # 模型对比柱状图
 ├── scripts/                        # CLI 入口
 │   ├── step_01_dataset_baseline.py
+│   ├── step_01b_load_ndjson.py          # 银联 NDJSON → parquet (Route A)
 │   ├── step_02_tokenize_corpus.py
-│   ├── step_03_train_model.py
-│   ├── step_04_extract_embeddings.py
-│   ├── step_05_fraud_detection.py
-│   └── run_pipeline.py             # 全流程一键执行
-├── tests/
-├── pyproject.toml
+│   ├── step_02_tokenize_ndjson.py       # 银联 parquet → corpus + tokenizer state (Route A)
+│   ├── step_03_train_model.py           # --variant {tabformer,yl}
+│   ├── step_04_extract_embeddings.py    # --dataset-config dataset_yl 切到银联
+│   ├── step_05_fraud_detection.py       # --dataset-config dataset_yl 切到银联
+│   ├── step_06_finetune_routec.py       # Route C：Llama+GPT2+分类头+LoRA+业务损失
+│   └── run_pipeline.py             # 全流程一键执行（仅 TabFormer Step 1-5）
+├── configs/
+│   ├── {dataset,tokenizer,training,xgboost}.yaml   # TabFormer 路线
+│   ├── dataset_yl.yaml, training_yl.yaml           # 银联 NDJSON 路线 (Route A)
+│   └── routec/default.json                          # Route C 微调主配置
+├── examples/                                  # 仓库内置冒烟样例
+│   ├── sample_data/smoke.jsonl
+│   └── generate_smoke_sample.py
+├── tests/                                     # 25 个 CPU 测试（含 Route A + Route C）
+├── pyproject.toml                             # extras: [dev][gpu][nemo][routec]
 ├── requirements.txt
 └── Makefile
 ```
@@ -75,7 +85,8 @@ transaction-model/
 | Python | >= 3.9 | CPU 流程已测试 3.13.5；GPU 流程（RAPIDS）建议 3.11，已测试 3.11 |
 | CUDA | 12.x | 仅训练/推理时需要，数据管道支持纯 CPU |
 | PyTorch | >= 2.1 | |
-| Transformers | >= 4.40 | |
+| Transformers | >= 4.40 (CLM 预训) / >= 4.46 (Route C 微调) | Route C 需 `[routec]` extra |
+| peft | >= 0.10 | 仅 Route C 需要（`pip install -e ".[routec]"`） |
 
 ## 快速开始
 
@@ -91,6 +102,11 @@ pip install -e ".[gpu]" --extra-index-url https://pypi.nvidia.com
 
 # NeMo 训练框架 (可选，仅训练步骤需要)
 pip install -e ".[nemo]"
+
+# Route C 混合下游微调（Llama+GPT2+分类头+LoRA，需要 route A 预训 ckpt）
+# 拉取 peft>=0.10 与 transformers>=4.46；可与 [nemo]/[gpu] 组合：
+pip install -e ".[routec]"
+# 或：pip install -e ".[routec,nemo]"
 ```
 
 ### Docker（推荐用于跨机器一致性）
@@ -160,6 +176,29 @@ python scripts/step_05_fraud_detection.py               # 欺诈检测对比
 ```
 
 每步均支持 `--help` 查看可用参数。
+
+### 银联（YL）NDJSON 路线：Route A + Route C
+
+```bash
+# 路线 A：NDJSON → tokenized corpus → Llama decoder CLM → 嵌入 → XGBoost
+python scripts/step_01b_load_ndjson.py --ndjson-dir data/yl/raw   [--no-gpu]
+python scripts/step_02_tokenize_ndjson.py --config dataset_yl --force
+# ⚠️ 把上一步打印的 vocab_size 回填 configs/training_yl.yaml::model.config.vocab_size
+python scripts/step_03_train_model.py --variant yl --demo
+python scripts/step_04_extract_embeddings.py --dataset-config dataset_yl
+python scripts/step_05_fraud_detection.py    --dataset-config dataset_yl
+
+# 路线 C：Llama+GPT2+分类头 + LoRA + 业务损失（focal_with_amount / pAUC_sigmoid）
+# 前置：路线 A 已产出 models/decoder-yl/ 与 data/yl/yl_tokenizer.json
+pip install -e ".[routec]"          # 含 peft, transformers>=4.46
+python scripts/step_06_finetune_routec.py --config configs/routec/default.json --demo --device cuda
+```
+
+> 无数据上手：仓库内置合成样例 [`examples/sample_data/smoke.jsonl`](examples/sample_data/smoke.jsonl)
+> （20 用户 / 530 笔 / 10 正 10 负）。可直接跑 `pytest tests/` 与
+> `python scripts/step_01b_load_ndjson.py --ndjson-dir examples/sample_data --no-gpu`，
+> 详见 [`examples/README.md`](examples/README.md)。**smoke 数据只用于 pipeline 不崩，
+> AUC/loss 数字无参考价值**。
 
 ## Pipeline 各步骤说明
 
@@ -372,22 +411,40 @@ print(f"Vocab size: {tokenizer.get_vocab_size()}")
 | 步骤 | CPU | GPU | 说明 |
 |------|-----|-----|------|
 | Step 1 数据基线 | ✅ | ✅ 自动 cuDF 加速 | XGBoost 自动选 cuda/cpu |
+| Step 1b NDJSON 加载（YL） | ✅（`--no-gpu` 走 pandas） | ✅ cuDF 加速 | Route A 入口 |
 | Step 2 语料生成 | ❌ | ✅ **必需 cuDF** | `FinancialTokenizerPipeline.preprocess` 使用 cuDF 字符串/日期/hash |
+| Step 2b NDJSON token 化（YL）| ❌ | ✅ **必需 cuDF** | 同 Step 2，YLPipeline.preprocess 走 cuDF |
 | Step 3 模型训练 | ❌ | ✅ **必需 CUDA** | NeMo AutoModel + FSDP2 |
 | Step 4 嵌入提取 | ❌ | ✅ **必需 cuDF + CUDA** | 复用 Step 2 的 tokenizer + GPU 模型推理 |
 | Step 5 欺诈检测 | ✅ | ✅ 自动 | XGBoost 自动检测 cuda |
+| Step 6 Route C 微调 | ✅（demo 可 `--device cpu`） | ✅ 建议 | `python scripts/step_06_finetune_routec.py`；DeepSpeed/FSDP 未启用（见 upgrade/ylformer.md §C7） |
+
+## Route C 速查
+
+| 配置维度 | 取值 |
+|----------|------|
+| `task_type` | `lora`（默认）/ `freeze` / `all_params` |
+| `llama.pool_mode` | `last_token` / `mean` / `cls` |
+| `loss_fn.name` | `sft_cross_loss` / `sft_focal_loss_weight` / `sft_focal_loss_with_amount`（默认）/ `sft_pAUC_sigmoid_loss` |
+| `lora.target_modules` 默认 | `["q_proj", "v_proj"]` |
+| 输出 | `models/routec/ckpt_step*.pt`、`log/routec/<step>_val_prob.json`（每用户概率） |
+
+| 步骤 | CPU | GPU | 说明 |
+|------|-----|-----|------|
 | 可视化 | ✅ | ✅ 可选 cuML | UMAP 优先 cuML，自动回退 sklearn |
 
-**摘要**: CPU 环境可以运行 Step 1 / Step 5 / 可视化；任何涉及 tokenizer 与 decoder 模型的步骤都需要 GPU。在仅 CPU 的开发机上能 `import transaction_model.tokenizer`（不会抛 `ImportError`），但调用 `preprocess` / `transform` 会抛 `ImportError` 报告缺失的 GPU 库。
+**摘要**: CPU 环境可以运行 Step 1 / Step 1b（`--no-gpu`）/ Step 5 / 可视化；Step 2/2b 需要 cuDF；Step 3/4/6 涉及 CUDA。在仅 CPU 的开发机上能 `import transaction_model.tokenizer`（不会抛 `ImportError`），但调用 `preprocess` / `transform` 会抛 `ImportError` 报告缺失的 GPU 库。
 
 ## 开发
 
 ```bash
-# 安装开发依赖
-pip install -e ".[dev]"
+# 安装开发依赖（默认仅 dev；要跑 route C 测试再加 routec）
+pip install -e ".[dev,routec]"
 
-# 运行测试
+# 运行全部测试 —— 25 passed / 1 skipped (GPU-only)
 pytest tests/ -v
+# 仅 Route C 集成测试（CPU 即可）
+pytest tests/test_routec_combined.py -v
 
 # 代码格式检查
 make test

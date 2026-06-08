@@ -181,6 +181,43 @@ device: "auto"  # auto / cuda / cpu
 raw_csv: "data/TabFormer/raw/card_transaction.v1.csv"
 ```
 
+### 5.4 银联（YL）路线变体配置（`configs/dataset_yl.yaml` / `training_yl.yaml`）
+
+Route A 的 NDJSON 数据通过**并列的 `_yl.yaml`** 文件 + `--variant yl` /
+`--dataset-config dataset_yl` 切换，**不要**改 `dataset.yaml` / `tokenizer.yaml`：
+
+```yaml
+# configs/dataset_yl.yaml
+dataset:
+  source: "ndjson"                    # 新增字段，与 TabFormer "csv" 区分
+  ndjson_dir: "data/yl/raw"
+  cert_col: "cert_sm3"                # 用户标识（替代 User/Card）
+  label_col: "label"                  # 用户级标签（顶层广播）
+  amount_idx: 19                      # 金额在 trans 数组下标
+
+tokenizer:
+  variant: "yl"                       # 调度走 YLPipeline / YLTabularTokenizer
+  amount_strategy: "quantile"         # 数据驱动分桶
+  state_path: "data/yl/yl_tokenizer.json"   # fit 后必须保存 vocab state，反序列复用
+```
+
+> **关键差异**：词表是 fit 出来的（不能静态计算 vocab_size）。首次跑 `step_02_tokenize_ndjson.py`
+> 后必须把控制台打印的 `vocab_size` 回填到 `configs/training_yl.yaml::model.config.vocab_size`。
+
+### 5.5 Route C JSON 配置（`configs/routec/default.json`）
+
+Route C 不走 Hydra/YAML，用 dataclass 直读 JSON（对齐 `risk_control_2/configs/default.json`）：
+
+```python
+from transaction_model.finetune.config import load_config
+cfg = load_config("configs/routec/default.json")   # -> RouteCConfig dataclass
+llm_hs = cfg.llama["hidden_size"]                   # 子树保持 dict
+task = cfg.task_type                                # 顶层字段是 dataclass attribute
+```
+
+字段子树（`llama` / `lora` / `gpt2` / `decode` / `data_config` / `loss_fn` / `step_scheduler` / `paths`）
+一律 dict；顶层键在 `RouteCConfig` 里有 default。新增子树时同步扩展 dataclass 字段。
+
 ---
 
 ## 6. GPU/CPU 自适应模式
@@ -240,7 +277,16 @@ def get_device() -> str:
 
 ### 7.1 使用 `print()` 而非 `logging`
 
-所有数据管道、检测、可视化模块统一使用 `print()` 输出进度信息。仅 `decoder_inference.py` 使用 `logging`。
+主流程（数据/检测/可视化/Route A 入口）统一使用 `print()` 输出进度信息。
+例外：
+
+- `decoder_inference.py` 用 `logging`（沿用 NVIDIA 风格）
+- **Route C 整个 `transaction_model/finetune/` 子包用 `logging`**
+  （`logger = logging.getLogger(__name__)`，入口脚本 `step_06_finetune_routec.py` 统一 `logging.basicConfig`）。
+  原因：训练循环日志密度高、需要 INFO/DEBUG/WARN 分级，转入结构化日志更合用。
+
+在一处模块内不混用两种。Route A 的 `data/ndjson_loader.py` 仍走 `print`，
+Route C 的 `finetune/{factory,trainer,models/*}` 走 `logging`，互不冲突。
 
 ### 7.2 进度输出格式
 

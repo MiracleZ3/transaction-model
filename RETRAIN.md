@@ -4,6 +4,12 @@
 >
 > 适用场景包括但不限于：申赎方向预测、流失预警、客户分层、产品推荐、异常行为检测。
 >
+> **银联风控 NDJSON 用户**：本文档面向"自定义 CSV 领域迁移"，**不需要照本文改任何代码**——
+> 银联 `risk_control_2` NDJSON 数据已通过 Route A（独立入口 `step_01b`/`step_02_tokenize_ndjson.py`）
+> + Route C（`step_06_finetune_routec.py`，Llama+GPT2+分类头+业务损失）**直接落地**。
+> 请直接读 [`README.md`](README.md) §"银联（YL）NDJSON 路线"、[`How_To_Use.md`](How_To_Use.md) §13、
+> [`upgrade/ylformer.md`](upgrade/ylformer.md)，并用 [`examples/sample_data/smoke.jsonl`](examples/sample_data/smoke.jsonl) 跑冒烟。
+>
 > 项目原结构（[`README.md`](README.md)）与训练流程（[`How_To_Use.md`](How_To_Use.md)）保持不变，本文只描述"哪些代码要改、怎么改、改的顺序"。
 
 ---
@@ -239,6 +245,24 @@ Step 5 需要改：
 
 跳过 Step 5 完全不跑 XGBoost，直接拿 `data/embeddings/*.npy` 跑 UMAP / HDBSCAN——
 这些代码已经在 `visualization/embedding_viz.py` 里现成可用。
+
+### 4.3 替代方案：Route C（Llama+GPT2+分类头 + 业务损失）
+
+如果下游希望**保留端到端分类头并使用业务损失**（如金额加权 focal、partial-AUC pairwise），
+而不放弃 Step 3 训练的 decoder 表征，应走 **Route C**：
+
+```bash
+pip install -e ".[routec]"        # peft>=0.10, transformers>=4.46
+python scripts/step_06_finetune_routec.py --config configs/routec/default.json --demo
+```
+
+Route C 在 Llama（route A 预训 ckpt，冻结 + LoRA）之后接一个 GPT2 跨交易时序编码器，
+再加分类头。支持 4 个业务损失：
+`sft_focal_loss_with_amount`（默认，金额加权）/ `sft_pAUC_sigmoid_loss` /
+`sft_focal_loss_weight` / `sft_cross_loss`。完整说明见
+[`How_To_Use.md`](How_To_Use.md) §13 与 [`upgrade/ylformer.md`](upgrade/ylformer.md) §第二阶段。
+
+> 这是 §4.1 表里"加分类 head"的现成实现，不必再自己写。
 
 ---
 

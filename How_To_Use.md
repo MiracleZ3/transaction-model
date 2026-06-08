@@ -1,8 +1,18 @@
 # Transaction Model 使用指南
 
-本指南覆盖金融交易基础模型（Financial Transaction Foundation Model）的**完整生命周期**：环境准备 → 数据处理 → 分词 → 训练 → 嵌入提取 → 欺诈检测 → 评估与决策。第 [7 节](#7-是否需要重新预训练决策树)给出"是否需要重训"的判断框架。
+本指南覆盖金融交易基础模型（Financial Transaction Foundation Model）的**完整生命周期**：环境准备 → 数据处理 → 分词 → 训练 → 嵌入提取 → 欺诈检测 → 评估与决策。第 [8 节](#8-是否需要重新预训练决策树)给出"是否需要重训"的判断框架。
 
 > 项目结构与编码规范请参考 [`README.md`](README.md) 与 [`CONVENTIONS.md`](CONVENTIONS.md)。本指南只关注**怎么用**。
+
+> **银联风控 NDJSON 用户请先读 §13**：本指南 §3–§7 主要覆盖 **TabFormer CSV** 路径。
+> 银联 `risk_control_2` 风格 NDJSON（每行一个用户的 `{"cert_sm3", "trans": [[...20+字段...]], "label"}`）
+> 走两条独立路线，命令入口与配置文件都与 TabFormer 不同：
+> - **路线 A**（NDJSON → tokenized corpus → Llama decoder CLM → 嵌入 → XGBoost）：`step_01b_load_ndjson.py`
+>   → `step_02_tokenize_ndjson.py` → `step_03_train_model.py --variant yl` → `step_04_extract_embeddings.py --dataset-config dataset_yl`
+>   → `step_05_fraud_detection.py --dataset-config dataset_yl`。详见 [`upgrade/ylformer.md`](upgrade/ylformer.md)。
+> - **路线 C**（Llama route-A ckpt + GPT2 cross-txn + 分类头 + LoRA + 业务损失）：
+>   `step_06_finetune_routec.py --config configs/routec/default.json`。详见本指南 [§13](#13-route-c--llamagpt2-业务损失微调)。
+> 冒烟数据见 [`examples/sample_data/smoke.jsonl`](examples/sample_data/smoke.jsonl)。
 
 ---
 
@@ -20,6 +30,7 @@
 10. [常见问题与故障排查](#10-常见问题与故障排查)
 11. [清理与重置](#11-清理与重置)
 12. [在容器中运行](#12-在容器中运行)
+13. [Route C — Llama+GPT2 业务损失微调](#13-route-c--llamagpt2-业务损失微调)
 
 ---
 
@@ -266,6 +277,10 @@ models/decoder-demo/checkpoints/      # --demo 模式
 
 **目的**：用训练好的 decoder 提取每笔交易的 512-dimensional 嵌入（last-token pooling）。
 
+> **银联 NDJSON 用户**：命令需加 `--dataset-config dataset_yl`，会从 `configs/dataset_yl.yaml`
+> 推断 `tokenizer.variant: "yl"` + `state_path`，复用 YLPipeline fit 后保存的词表。
+> 否则会回退到 FinancialTokenizerPipeline + TabFormer 词表，标签列也错位。
+
 ### 6.1 执行
 
 ```bash
@@ -305,6 +320,10 @@ inference:
 ---
 
 ## 7. Step 5 — 欺诈检测评估
+
+> **银联 NDJSON 用户**：命令需加 `--dataset-config dataset_yl`。Baseline 列改成 14 个 `cups_*`
+> 字段（见 `configs/dataset_yl.yaml::feature_cols`），由 OrdinalEncoder 处理字符串字段。
+> 用户级 `label` 在 NDJSON 加载时已广播到每行；fraud_col 自动切换到 `"label"`。
 
 **目的**：用 XGBoost 在三种特征空间对比欺诈检测效果。
 
@@ -700,6 +719,80 @@ make compose-down          # 停掉所有本项目的容器
 make docker-clean          # 删本项目的 4 个镜像
 docker system prune        # 系统级清理（小心）
 ```
+
+---
+
+## 13. Route C — Llama+GPT2 业务损失微调
+
+> 设计背景与字段映射详见 [`upgrade/ylformer.md`](upgrade/ylformer.md) §第二阶段。本节只讲怎么跑。
+
+### 13.1 前置条件
+
+| 件 | 说明 |
+|----|------|
+| Route A 预训 checkpoint | `models/decoder-yl/` 下有 `config.json` + `safetensors`（由 `step_03_train_model.py --variant yl` 产出） |
+| YL tokenizer state | `data/yl/yl_tokenizer.json`（由 `step_02_tokenize_ndjson.py` 产出，**不可删**） |
+| 银联 NDJSON 数据 | `data/yl/raw/*.jsonl` 由 `step_01b_load_ndjson.py` 加载（亦可直接读 `examples/sample_data/smoke.jsonl` 冒烟） |
+| 依赖 | `pip install -e ".[routec]"` 拉取 `peft>=0.10` 与 `transformers>=4.46` |
+
+### 13.2 命令
+
+```bash
+# 冒烟（30 步，CPU 也可，--device cpu 退化为纯 fp32）
+python scripts/step_06_finetune_routec.py \
+    --config configs/routec/default.json --demo --device cuda
+
+# 正式微调
+python scripts/step_06_finetune_routec.py \
+    --config configs/routec/default.json --device cuda --max-steps 5000
+
+# 续训（自动找 models/routec/ 下最新 ckpt_step*.pt）
+python scripts/step_06_finetune_routec.py --auto-load
+```
+
+支持命令行参数：`--config` / `--demo` / `--max-steps` / `--auto-load` / `--device`。
+
+### 13.3 配置速查（`configs/routec/default.json`）
+
+| 字段 | 取值 | 说明 |
+|------|------|------|
+| `task_type` | `lora`（默认）/ `freeze` / `all_params` | LoRA 注入 query/value；freeze 完全锁住 Llama；all_params 全量微调 |
+| `llama.pool_mode` | `last_token` / `mean` / `cls` | 单笔交易如何池化 Llama 输出为 per-txn embedding |
+| `loss_fn.name` | 见 §13.4 | 切换业务损失 |
+| `lora.r` / `alpha` / `target_modules` | 8 / 32 / `["q_proj","v_proj"]` | LoRA 容量；r→r/alpha=8/32 是常见起点 |
+| `data_config.hiswindow` | 512 | 单用户序列最大长度（截窗） |
+| `data_config.max_txn_len` | 32 | 单笔交易内部 token 数（含 `<bos>`/`<eos>` padding） |
+| `step_scheduler.grad_accum_steps` | 4 | 梯度累积；与 batch_size 一起决定有效 batch |
+
+### 13.4 业务损失仓库
+
+`transaction_model/finetune/losses/__init__.py::LOSS_REGISTRY` 注册了 4 个损失，全部以
+`sft_*` 前缀命名（移植自 `risk_control_2/losses/`，去掉 registry 依赖）：
+
+| `loss_fn.name` | 行为 | amount 参数 |
+|----------------|------|-------------|
+| `sft_cross_loss` | 纯交叉熵，对照基线 | 忽略 |
+| `sft_focal_loss_weight` | focal + `pos_weight` 加权（无金额加权） | 忽略 |
+| `sft_focal_loss_with_amount` | **金额加权 focal**（核心业务损失） — 正样本权重 = clamp(0.5·amount/100k, 1, amount_clip) | **必传**（从 `trans[-1][19]` 取末笔金额） |
+| `sft_pAUC_sigmoid_loss` | partial-AUC pairwise sigmoid（top-k 困难负样本） | 忽略 |
+
+切换损失：编辑 `configs/routec/default.json::loss_fn.{name,params}` 即可，无需改代码。
+
+### 13.5 输出
+
+| 路径 | 内容 |
+|------|------|
+| `models/routec/ckpt_step<k>.pt` | checkpoint（含 model + optimizer + scheduler + scaler） |
+| `models/routec/adapter_step<k>/` | LoRA adapter 单独保存（便于部署到不同的 base 模型） |
+| `log/routec/<k>_val.json` | 验证指标（acc/f1/auc/ap） |
+| `log/routec/<k>_val_prob.json` | 每用户概率（用于外部对账）：`{cert_sm3: {pred, p0, p1, label, amount}}` |
+| `log/routec/train_stats.jsonl` | 训练 loss + lr 历史 |
+
+### 13.6 已知边界
+
+- DeepSpeed / FSDP 暂未启用；trainer 是单 GPU 线性结构（多卡 DDP 友好但未实测）。
+- 仅做下游微调，不重训 Llama；移植的 4 个 loss 也都是分类损失，**不含** `dense_multi_loss` 多变量预训损失。
+- Route C 与 Route A Step 4/5（嵌入 + XGBoost）**互补但解耦**：Route C 端到端出二分类，Route A 出 512d 嵌入喂 XGBoost。两者可平行对比。
 
 ---
 
