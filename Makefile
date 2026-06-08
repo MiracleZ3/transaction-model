@@ -73,9 +73,10 @@ test:
 # ═══════════════════════════════════════════════════════════════════
 DOCKER_REG   ?= local
 DOCKER_TAG   ?= latest
+NGC_TAG      ?= 24.10-py3
 DOCKER_FLAGS ?= --progress=plain
 
-# 1. 基础镜像（cpu / gpu 镜像 FROM 它，必须先构建）
+# 1. 基础镜像（CPU 路线用，gpu 镜像 FROM NGC 不依赖它）
 docker-build-base:
 	docker build $(DOCKER_FLAGS) -f docker/Dockerfile.base \
 	    -t $(DOCKER_REG)/tm-base:$(DOCKER_TAG) .
@@ -86,22 +87,24 @@ docker-build-cpu: docker-build-base
 	    --build-arg REGISTRY=$(DOCKER_REG) --build-arg TAG=$(DOCKER_TAG) \
 	    -t $(DOCKER_REG)/tm-cpu:$(DOCKER_TAG) .
 
-# 3. GPU 训练镜像（CUDA + cuDF/cuML/cuPy + NeMo）：~10 GB，覆盖 Step 2/3
-docker-build-gpu-train:
-	docker build $(DOCKER_FLAGS) -f docker/Dockerfile.gpu.train \
-	    -t $(DOCKER_REG)/tm-gpu-train:$(DOCKER_TAG) .
+# 3. GPU 统一镜像（NGC PyTorch base + RAPIDS + NeMo + Route C）：~14 GB
+#    覆盖 Step 2/3/4 + Route C 微调。FROM nvcr.io/nvidia/pytorch:NGC_TAG
+#    可用 build-arg 覆盖 NGC 版本：make docker-build-gpu NGC_TAG=24.10-py3
+docker-build-gpu:
+	docker build $(DOCKER_FLAGS) -f docker/Dockerfile.gpu \
+	    --build-arg NGC_TAG=$(NGC_TAG) \
+	    -t $(DOCKER_REG)/tm-gpu:$(DOCKER_TAG) .
 
-# 4. GPU 推理镜像（CUDA + cuDF + transformers）：~8 GB，覆盖 Step 4
-docker-build-gpu-infer:
-	docker build $(DOCKER_FLAGS) -f docker/Dockerfile.gpu.infer \
-	    -t $(DOCKER_REG)/tm-gpu-infer:$(DOCKER_TAG) .
+# 别名（旧名）：与 docker-build-gpu 等价，向后兼容
+docker-build-gpu-train: docker-build-gpu
+docker-build-gpu-infer: docker-build-gpu
 
-# 5. 一键构建全部（CPU + 两套 GPU；要求宿主可拉 nvidia/cuda）
-docker-build: docker-build-cpu docker-build-gpu-train docker-build-gpu-infer
+# 4. 一键构建全部（CPU + GPU；要求宿主可拉 nvcr.io/nvidia/pytorch）
+docker-build: docker-build-cpu docker-build-gpu
 	@echo "All images built:"
 	@docker images --format "  {{.Repository}}:{{.Tag}}\t{{.Size}}" | grep "^$(DOCKER_REG)/tm-"
 
-# 6. 仅构建 CPU（开发机 / 无 nvidia 驱动时）
+# 5. 仅构建 CPU（开发机 / 无 nvidia 驱动时）
 docker-build-cpu-only: docker-build-cpu
 	@echo "CPU image built (skip GPU)."
 
@@ -121,15 +124,16 @@ docker-push:
 	fi
 	docker push $(DOCKER_REG)/tm-base:$(DOCKER_TAG)
 	docker push $(DOCKER_REG)/tm-cpu:$(DOCKER_TAG)
-	docker push $(DOCKER_REG)/tm-gpu-train:$(DOCKER_TAG)
-	docker push $(DOCKER_REG)/tm-gpu-infer:$(DOCKER_TAG)
+	docker push $(DOCKER_REG)/tm-gpu:$(DOCKER_TAG)
 
 # 9. 清理本项目的所有镜像
 docker-clean:
 	-docker rmi $(DOCKER_REG)/tm-cpu:$(DOCKER_TAG) \
-	    $(DOCKER_REG)/tm-gpu-train:$(DOCKER_TAG) \
-	    $(DOCKER_REG)/tm-gpu-infer:$(DOCKER_TAG) \
+	    $(DOCKER_REG)/tm-gpu:$(DOCKER_TAG) \
 	    $(DOCKER_REG)/tm-base:$(DOCKER_TAG) 2>/dev/null
+	# 旧名镜像（迁移期清理）
+	-docker rmi $(DOCKER_REG)/tm-gpu-train:$(DOCKER_TAG) \
+	    $(DOCKER_REG)/tm-gpu-infer:$(DOCKER_TAG) 2>/dev/null
 	-docker image prune -f --filter label="org.opencontainers.image.title=transaction-model*"
 
 # ═══════════════════════════════════════════════════════════════════

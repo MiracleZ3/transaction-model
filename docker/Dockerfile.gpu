@@ -1,0 +1,82 @@
+# docker/Dockerfile.gpu
+#
+# 统一 GPU 镜像：基于 NGC PyTorch 容器，含 PyTorch + CUDA + RAPIDS (cuDF/cuML/cuPy)
+# + NeMo + Transformers + peft。覆盖 Step 2/3/4 + Route C 微调。
+#
+# 基础镜像：nvcr.io/nvidia/pytorch:24.10-py3
+#   - PyTorch 2.5+，CUDA 12.5（NGC 24.10 release）
+#   - 不含 RAPIDS / NeMo / peft，本 Dockerfile 用 pip 装
+#   - ~11 GB base + ~3 GB 依赖 ≈ 14 GB 最终镜像
+#
+# 构建（需宿主有 nvidia-container-toolkit）：
+#   docker build -f docker/Dockerfile.gpu -t local/tm-gpu:latest .
+#
+# 故障回退（BuildKit 报 libnetwork / size validation 错时）：
+#   DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.gpu -t local/tm-gpu:latest .
+
+# 默认值；可通过 --build-arg 覆盖版本
+ARG NGC_TAG=24.10-py3
+ARG RAPIDS_VERSION=24.10
+
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
+
+LABEL org.opencontainers.image.title="transaction-model/gpu"
+LABEL org.opencontainers.image.description="NGC PyTorch + RAPIDS + NeMo + Route C 依赖"
+LABEL org.opencontainers.image.source="https://github.com/MiracleZ3/transaction-model"
+
+# NGC 镜像默认 WORKDIR=/workspace，默认用户 root；沿用即可。
+WORKDIR /workspace
+
+# 环境变量：禁用 pip cache（节省层体积）；设置时区。
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# 1) 先 COPY 依赖描述符（变更频率低；pyproject + requirements）
+COPY pyproject.toml requirements.txt ./
+
+# 2) 安装项目 dev 依赖（不含 gpu/nemo/routec extra——下面分步装）
+#    NGC pytorch 已有 pip/setuptools；只需升级一下避免老版本解析问题。
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -e ".[dev]"
+
+# 3) RAPIDS：cuDF + cuML + cuPy（必须从 NVIDIA 索引装 -cu12 后缀的包）
+ARG RAPIDS_VERSION
+RUN pip install --extra-index-url https://pypi.nvidia.com \
+        "cudf-cu12==${RAPIDS_VERSION}.*" \
+        "cuml-cu12==${RAPIDS_VERSION}.*" \
+        "cupy-cuda12x>=13.0"
+
+# 4) Route A 训练框架（NeMo AutoModel）
+RUN pip install -e ".[nemo]"
+
+# 5) Route C 微调（peft + transformers>=4.46）
+RUN pip install -e ".[routec]"
+
+# 6) 非 root 用户（uid=1000，与大多 Linux 宿主用户对齐）
+RUN useradd --create-home --shell /bin/bash --uid 1000 appuser && \
+    chown -R appuser:appuser /workspace
+
+# 7) 复制项目代码（放最后，代码改动不触发上面依赖重装）
+COPY --chown=appuser:appuser . /workspace
+
+# 8) entrypoint + healthcheck
+USER root
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/healthcheck.py /workspace/docker/healthcheck.py
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER appuser
+WORKDIR /workspace
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=30s \
+    CMD python /workspace/docker/healthcheck.py || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["--help"]

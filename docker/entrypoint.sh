@@ -40,7 +40,7 @@ Examples:
     docker run --rm --gpus all \
         -v $(pwd)/data:/workspace/data \
         -v $(pwd)/models:/workspace/models \
-        tm-gpu-train:latest train --demo
+        tm-gpu:latest train --demo
 
     # Pipeline with profile-selected steps
     docker run --rm tm-cpu:latest pipeline --steps data,detect

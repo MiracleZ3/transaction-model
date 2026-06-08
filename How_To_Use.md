@@ -605,8 +605,8 @@ python scripts/run_pipeline.py --steps extract,detect --force
 |------|------|------|------------|
 | `tm-base` | ~800 MB | 共享层（不直接 run） | `docker/Dockerfile.base` |
 | `tm-cpu` | ~1.2 GB | Step 1 / Step 5 / 测试 / 可视化 | `docker/Dockerfile.cpu` |
-| `tm-gpu-train` | ~10 GB | Step 2 (tokenize) + Step 3 (train) | `docker/Dockerfile.gpu.train` |
-| `tm-gpu-infer` | ~8 GB | Step 4 (extract) | `docker/Dockerfile.gpu.infer` |
+| `tm-gpu` | ~10 GB | Step 2 (tokenize) + Step 3 (train) | `docker/Dockerfile.gpu` |
+| `tm-gpu` | ~8 GB | Step 4 (extract) | `docker/Dockerfile.gpu` |
 
 构建产物通过 `./data` / `./models` volume 持久化，镜像内**不打包数据/模型**。
 
@@ -636,10 +636,10 @@ make docker-push DOCKER_REG=ghcr.io/miraclez3 DOCKER_TAG=v1.0
 | `detect` | tm-cpu | `make compose-detect` |
 | `test` | tm-cpu | `make compose-test` |
 | `cpu-pipeline` | tm-cpu | `make compose-cpu-pipeline` |
-| `tokenize` | tm-gpu-train | `make compose-tokenize` |
-| `train` | tm-gpu-train | `TRAIN_NUM_GPUS=8 make compose-train` |
-| `extract` | tm-gpu-infer | `make compose-extract` |
-| `all` | tm-gpu-train | `make compose-all` |
+| `tokenize` | tm-gpu | `make compose-tokenize` |
+| `train` | tm-gpu | `TRAIN_NUM_GPUS=8 make compose-train` |
+| `extract` | tm-gpu | `make compose-extract` |
+| `all` | tm-gpu | `make compose-all` |
 
 **示例 1：在 CPU 上跑 Step 5（fraud detection）**
 ```bash
@@ -673,7 +673,7 @@ docker run --rm \
 docker run --rm --gpus all \
     -v $(pwd)/data:/workspace/data \
     -v $(pwd)/models:/workspace/models \
-    local/tm-gpu-train:latest train --demo
+    local/tm-gpu:latest train --demo
 
 # 进入 shell 调试
 docker run --rm -it \
@@ -710,7 +710,7 @@ docker inspect --format='{{.State.Health.Status}}' <container_id>
 | `torchrun --nproc-per-node=8 ...` | `TRAIN_NUM_GPUS=8 make compose-train` |
 | `python scripts/step_04_extract_embeddings.py --force` | `make compose-extract -- --force` |
 
-*注意：`make compose-train -- --demo` 这种透传需通过 `.env` 的 `TRAIN_EXTRA_ARGS=--demo` 实现（compose 模板已留位置）。更直接的方式是 `docker run ... tm-gpu-train train --demo`。
+*注意：`make compose-train -- --demo` 这种透传需通过 `.env` 的 `TRAIN_EXTRA_ARGS=--demo` 实现（compose 模板已留位置）。更直接的方式是 `docker run ... tm-gpu train --demo`。
 
 ### 12.8 清理
 

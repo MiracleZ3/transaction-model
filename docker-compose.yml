@@ -65,7 +65,7 @@ services:
 
   # ─── GPU 训练模式 ─────────────────────────────────────────────────
   gpu-tokenize:
-    image: ${DOCKER_REGISTRY:-local}/tm-gpu-train:${DOCKER_TAG:-latest}
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu:${DOCKER_TAG:-latest}
     profiles: ["tokenize"]
     environment: *common-env
     volumes: *common-volumes
@@ -80,7 +80,7 @@ services:
     command: ["tokenize"]
 
   gpu-train:
-    image: ${DOCKER_REGISTRY:-local}/tm-gpu-train:${DOCKER_TAG:-latest}
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu:${DOCKER_TAG:-latest}
     profiles: ["train"]
     environment: *common-env
     volumes: *common-volumes
@@ -100,7 +100,7 @@ services:
 
   # ─── GPU 推理 ─────────────────────────────────────────────────────
   gpu-extract:
-    image: ${DOCKER_REGISTRY:-local}/tm-gpu-infer:${DOCKER_TAG:-latest}
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu:${DOCKER_TAG:-latest}
     profiles: ["extract"]
     environment: *common-env
     volumes: *common-volumes
@@ -116,7 +116,7 @@ services:
 
   # ─── 一键全流程（GPU） ───────────────────────────────────────────
   gpu-all:
-    image: ${DOCKER_REGISTRY:-local}/tm-gpu-train:${DOCKER_TAG:-latest}
+    image: ${DOCKER_REGISTRY:-local}/tm-gpu:${DOCKER_TAG:-latest}
     profiles: ["all"]
     environment: *common-env
     volumes: *common-volumes
