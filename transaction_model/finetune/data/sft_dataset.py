@@ -1,18 +1,23 @@
 """Route C 数据模块：NDJSON → [B,T,L] 张量 collate（CPU 友好）。
 
+两种 dataset 并存：
+  - SftNDJsonDataset        : map-style（index-based）。配合 DistributedSampler 做 sampler 分片。
+  - SftIterableDataset      : iterable-style。文件分片（file % world_size == rank），
+                              大数据（每文件几千用户）下更高效，与 risk_control_2 一致。
+
 把每条记录（一个用户的交易序列）变成 collate 期望的样本：
     {
-      "input_ids":       LongTensor [T', L]   每笔交易 15 + special token
-      "attention_mask":  LongTensor [T', L]
-      "his_time_stap":   LongTensor [T']      历史时间戳（秒）
-      "delta_time_stap": LongTensor [T']      相邻交易小时差（首位为 0）
+      "input_ids":       LongTensor [T_user, L]   每笔交易 15 + special token
+      "attention_mask":  LongTensor [T_user, L]
+      "his_time_stap":   LongTensor [T_user]      历史时间戳（秒）
+      "delta_time_stap": LongTensor [T_user]      相邻交易小时差（首位为 0）
       "label":           int
       "amount":          float                末笔金额（用于 focal_with_amount）
       "user":            str                  cert_sm3
     }
 
-`T'` 是该用户的实际交易数（按时间窗 hiswindow 截断前）。
-最后由 `collate_fn` 把 variable T' 补齐成 batch 的 [B, T, L]。
+`T_user` 是该用户的实际交易数（按时间窗 hiswindow 截断前）。
+最后由 `collate_fn` 把 variable T_user 补齐成 batch 的 [B, T, L]。
 
 关键决策：
   - 不复用 YLPipeline.transform（它一次处理整列 cuDF，对单交易不友好）
@@ -29,7 +34,7 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset
 
 from transaction_model.constants import (
     YL_AMOUNT_IDX,
@@ -306,3 +311,135 @@ def prepare_collate(pad_token_id: int, max_hiswindow: int = 512):
         pad_token_id=pad_token_id,
         max_hiswindow=max_hiswindow,
     )
+
+
+# =====================================================================
+# 文件分片 IterableDataset（大数据集，与 risk_control_2 SeqIterableDataset 一致）
+# =====================================================================
+
+class SftIterableDataset(IterableDataset):
+    """文件分片 IterableDataset。
+
+    每个 rank 只读 `record_idx % world_size == rank` 的 record。
+    适用于：
+      - 数据巨大（千万级用户），全部加载到一个 rank 的内存不现实
+      - 数据已分到多个 .jsonl 文件，自然适合 file % world_size 模式
+      - 想 1:1 复刻 risk_control_2::SeqIterableDataset 的训练行为
+
+    **注意**：与 `SftNDJsonDataset`（map-style + DistributedSampler）是 2 选 1，
+    由 `configs/routec/default_multinode.json::data_config.shard_mode` 控制：
+      shard_mode == "file"    → 用这个类
+      shard_mode == "sampler" → 用 SftNDJsonDataset + DistributedSampler
+    """
+
+    def __init__(
+        self,
+        ndjson_path: Path,
+        pipeline,
+        vocab: dict,
+        pad_token_id: int,
+        bos_token_id: int,
+        eos_token_id: int,
+        sep_token_id: int,
+        max_txn_len: int = 32,
+        minleng: int = 1,
+        max_hiswindow: int = 512,
+        rank: int = 0,
+        world_size: int = 1,
+        seed: int = 42,
+        repeat: bool = True,
+    ):
+        super().__init__()
+        self.ndjson_path = Path(ndjson_path)
+        self.pipeline = pipeline
+        self.vocab = vocab
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.sep_token_id = sep_token_id
+        self.max_txn_len = max_txn_len
+        self.minleng = minleng
+        self.max_hiswindow = max_hiswindow
+        self.rank = rank
+        self.world_size = world_size
+        self.seed = seed
+        self.repeat = repeat
+
+    def _records_for_this_rank(self) -> List[dict]:
+        """读 + 分片：lazily 在 __iter__ 内调用，避免 rank 0 提前阻塞。"""
+        import random as _rand
+
+        with open(self.ndjson_path, "r", encoding="utf-8", errors="ignore") as f:
+            all_records = []
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                all_records.append(json.loads(line))
+
+        # 文件分片：`i % world_size == rank`
+        mine = [r for i, r in enumerate(all_records) if i % self.world_size == self.rank]
+        rng = _rand.Random(self.seed + self.rank)
+        rng.shuffle(mine)
+        return mine
+
+    def __iter__(self):
+        records = self._records_for_this_rank()
+        while True:
+            for rec in records:
+                yield self._build_sample(rec)
+            if not self.repeat:
+                return
+
+    def _build_sample(self, rec: dict) -> dict:
+        """与 SftNDJsonDataset._load 里相同的 sample 逻辑，但单 record 调用。"""
+        trans_list = rec.get(YL_TRANS_KEY) or []
+        if len(trans_list) < self.minleng:
+            # 跳过样本：返回一个 sentinel；上层 collate 应容忍。
+            # 这里用 pad_token_id 占位 + n_txns=0 表达空样本，collate 时会被 mask 抹掉。
+            trans_list = []
+        if len(trans_list) > self.max_hiswindow:
+            trans_list = trans_list[-self.max_hiswindow:]
+
+        L = self.max_txn_len
+        n = max(len(trans_list), 1)
+        input_ids = np.full((n, L), self.pad_token_id, dtype=np.int64)
+        attention_mask = np.zeros((n, L), dtype=np.int64)
+        unix_ts = []
+        for i, txn in enumerate(trans_list):
+            ids, mask = encode_one_txn_via_pipeline(
+                self.pipeline, self.vocab, txn,
+                self.bos_token_id, self.eos_token_id,
+                self.sep_token_id, self.pad_token_id, L,
+            )
+            input_ids[i] = ids
+            attention_mask[i] = mask
+            unix_ts.append(float(txn[9]) if len(txn) > 9 else 0.0)
+
+        unix_ts_np = np.array(unix_ts, dtype=np.int64) if unix_ts else np.zeros(1, dtype=np.int64)
+        delta_secs = np.zeros(len(unix_ts_np), dtype=np.int64)
+        if len(unix_ts_np) > 1:
+            delta_secs[1:] = (unix_ts_np[1:] - unix_ts_np[:-1])
+        delta_hours = (delta_secs // 3600).astype(np.int64)
+        delta_hours = np.clip(delta_hours, 0, 2**31 - 1)
+
+        last_txn = trans_list[-1] if trans_list else []
+        amount = float(last_txn[YL_AMOUNT_IDX]) if len(last_txn) > YL_AMOUNT_IDX else 0.0
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "his_time_stap": unix_ts_np,
+            "delta_time_stap": delta_hours,
+            "label": int(rec.get(YL_LABEL_KEY, 0)),
+            "amount": amount,
+            "user": str(rec.get(YL_USER_KEY, "")),
+        }
+
+    def __len__(self) -> int:
+        """注意：IterableDataset 的 __len__ 信息有限，返回文件行数 / world_size 的估算。"""
+        try:
+            n_lines = sum(1 for _ in open(self.ndjson_path, encoding="utf-8", errors="ignore"))
+            return max(1, n_lines // max(self.world_size, 1))
+        except OSError:
+            return 0

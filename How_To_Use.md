@@ -790,9 +790,111 @@ python scripts/step_06_finetune_routec.py --auto-load
 
 ### 13.6 已知边界
 
-- DeepSpeed / FSDP 暂未启用；trainer 是单 GPU 线性结构（多卡 DDP 友好但未实测）。
+- ❌ DeepSpeed / FSDP 暂未启用 Route C 下游（trainer 走 torch 原生 DDP）。
 - 仅做下游微调，不重训 Llama；移植的 4 个 loss 也都是分类损失，**不含** `dense_multi_loss` 多变量预训损失。
 - Route C 与 Route A Step 4/5（嵌入 + XGBoost）**互补但解耦**：Route C 端到端出二分类，Route A 出 512d 嵌入喂 XGBoost。两者可平行对比。
+
+### 13.7 多机多卡部署
+
+Route C 自 `c307fb0` 起内置 torch 原生 DDP。**不需要 DeepSpeed**——纯 torch.distributed + gloo/nccl。
+
+#### 单机多卡
+
+```bash
+# 调用现成脚本：
+NGPUS=8 bash scripts/routec_ddp_single_node.sh
+# 或手动 torchrun：
+torchrun --nproc-per-node=8 --master-port=29500 \
+    scripts/step_06_finetune_routec.py \
+    --config configs/routec/default_multinode.json
+```
+
+#### 多机多卡
+
+每个节点单独起一份进程，只在 `NNODE_RANK` 上不同：
+
+```bash
+# node 0 (master)
+NNODES=2 NNODE_RANK=0 NGPUS=8 \
+    MASTER_ADDR=10.0.0.1 MASTER_PORT=29500 \
+    bash scripts/routec_ddp_multi_node.sh
+
+# node 1 (worker)
+NNODES=2 NNODE_RANK=1 NGPUS=8 \
+    MASTER_ADDR=10.0.0.1 MASTER_PORT=29500 \
+    bash scripts/routec_ddp_multi_node.sh
+```
+
+`scripts/routec_ddp_multi_node.sh` 已经把 `--nnodes / --node-rank / --master-addr / --master-port`
+透传给 torchrun，你只需要在每个节点上 export 4 个变量即可。
+
+#### 关键配置
+
+`configs/routec/default_multinode.json` 相对单卡 `default.json` 的差异：
+
+| 字段 | 单卡 | 多机多卡 | 说明 |
+|------|------|---------|------|
+| `strategy.name` | `single` | `ddp` | Trainer 内部自动识别（world_size>1 即 DDP 包装） |
+| `strategy.find_unused_parameters` | — | `true` | LoRA 模式建议 true（adapter 不覆盖所有模块） |
+| `strategy.timeout_minutes` | — | `60` | 多机跨网较慢，从默认上调 |
+| `data_config.shard_mode` | `sampler` | `sampler` 或 `file` | 见下表 |
+
+数据分片两种模式：
+
+| `shard_mode` | 适用 | 行为 | 跟 risk_control_2 哪个对齐 |
+|--------------|------|------|----------------------------|
+| `sampler`（默认） | 小/中型数据（百万级用户以内） | `DistributedSampler`：所有 rank 共享 dataset index，仅重复采样互不重叠 | 类似 risk_control_2 `__assigned_rank_for_files` 的 rank-modulo 思路 |
+| `file` | 大数据（千万级用户，文件已分片） | 每 rank 仅读 `record_idx % world_size == rank` 的 NDJSON 行；IterableDataset 无需 sampler | 与 `risk_control_2/data/pre_trained/data_load.py::SeqIterableDataset` 一致 |
+
+#### 关键约束（多机踩坑）
+
+1. **环境一致性**：所有节点的 `python / torch / transformers / peft` 版本必须一致。建议用同一个
+   镜像（`local/tm-gpu:latest`），见 §12.1。
+2. **路径可达**：`models/decoder-yl/`、`data/yl/yl_tokenizer.json`、`data/yl/raw/*.jsonl`
+   必须每个节点都能访问到（NFS 共享，或 rsync 提前同步）。
+3. **MASTER_ADDR 可解析**：必须是所有节点都能通信的 IP（master 节点的主网卡 IP）。
+4. **MASTER_PORT 不冲突**：所有节点必须用同一个端口；与同机其它任务冲突时改。
+5. **NCCL 网络配置**（NCCL 报错时）：
+   ```bash
+   export NCCL_SOCKET_IFNAME=eth0   # 选对网卡
+   export NCCL_IB_DISABLE=1          # 没 InfiniBand 时关
+   ```
+
+#### Route A 多机（NeMo FSDP2）
+
+Route A 不需要改代码；NeMo AutoModel + FSDP2 自动从 torchrun 注入的 `RANK/WORLD_SIZE`
+推断 world_size。只需把 `configs/training_yl.yaml::dist_env.timeout_minutes` 从 5 上调到 60
+（default 已调整），然后：
+
+```bash
+torchrun --nproc-per-node=8 --nnodes=2 --node-rank=$NODE_RANK \
+    --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
+    scripts/step_03_train_model.py --variant yl --max-steps 3000
+```
+
+#### 分布式故障排查
+
+| 率先出现的错误 | 可能根因 | 解决 |
+|----------------|----------|------|
+| `ConnectionRefusedError` master:port | node_rank>0 比 master 先起 | 等 master 起来再起 worker；或在 worker 上设 `--rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT` 改用 rendezvous 模式 |
+| `NCCL error: unhandled system error` | NCCL 选错网卡或 IB 配置 | `export NCCL_SOCKET_IFNAME=<对网卡>`；CPU 训练时 `export NCCL_BACKEND=gloo` |
+| `rank X exited with non-zero status` 但 rank 0 看起来正常 | 某个 rank 报错但被屏蔽 | 同步 stdout 看 rank X 的 stderr；或在 `cfg.log_level=DEBUG` 下重跑 |
+| `RuntimeError: Expected to have finished reduction` | DDP 在 `find_unused_parameters=False` 下遇到未 join 的参数 | 改 `strategy.find_unused_parameters=true`（LoRA 模式几乎必开） |
+| 训练 1 epoch 后 loss 不下降 | DistributedSampler 没 set_epoch，rank 间拿到相同 minibatch | trainer.train() 里 epoch 循环开头加 `if loader.sampler: loader.sampler.set_epoch(epoch)` |
+
+### 13.8 验证多机是否生效
+
+```bash
+# 检查 world_size 是否对：跑 demo、看 stdout
+NGPUS=2 bash scripts/routec_ddp_single_node.sh --demo
+
+# 应看到类似：
+# Route C 微调：task_type=lora loss=sft_focal_loss_with_amount
+#   rank/world_size: 0/2 (local_rank=0)
+#   rank/world_size: 1/2 (local_rank=1)
+```
+
+如果是 `[rank 0] ... DDP wrapped: rank=0/2 local_rank=0`，DDP 起来了。
 
 ---
 

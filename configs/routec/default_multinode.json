@@ -1,6 +1,8 @@
 {
-  "train_name": "routec_yl",
+  "train_name": "routec_yl_multinode",
   "task_type": "lora",
+
+  "_comment": "多机多卡 Route C 配置：覆盖 default.json，配合 torchrun 使用。",
 
   "llama": {
     "model_path": "models/decoder-yl",
@@ -39,7 +41,9 @@
     "batch_size": 12,
     "max_txn_len": 32,
     "minleng": 1,
-    "hiswindow": 512
+    "hiswindow": 512,
+    "shard_mode": "sampler",
+    "_comment_shard_mode": "sampler（默认，小数据稳）或 file（与 risk_control_2 一致，文件分片大数据适用）"
   },
 
   "loss_fn": {
@@ -56,7 +60,7 @@
     "max_steps": 5000,
     "grad_accum_steps": 4,
     "val_every_steps": 200,
-    "ckpt_every_steps": 500,
+    "ckpt_every_steps": 1000,
     "warmup_steps": 200,
     "init_lr": 0.0001,
     "min_lr": 0.0000006,
@@ -68,8 +72,10 @@
   },
 
   "strategy": {
-    "name": "single",
-    "find_unused_parameters": true
+    "name": "ddp",
+    "backend": "nccl",
+    "find_unused_parameters": true,
+    "timeout_minutes": 60
   },
 
   "paths": {

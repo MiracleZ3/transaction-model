@@ -35,6 +35,7 @@ class RouteCConfig:
     data_config: Dict[str, Any] = field(default_factory=dict)
     loss_fn: Dict[str, Any] = field(default_factory=dict)
     step_scheduler: Dict[str, Any] = field(default_factory=dict)
+    strategy: Dict[str, Any] = field(default_factory=dict)
     paths: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,5 +58,6 @@ def load_config(path: str | Path) -> RouteCConfig:
         data_config=raw.get("data_config", {}),
         loss_fn=raw.get("loss_fn", {}),
         step_scheduler=raw.get("step_scheduler", {}),
+        strategy=raw.get("strategy", {}),
         paths=raw.get("paths", {}),
     )

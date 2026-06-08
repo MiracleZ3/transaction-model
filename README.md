@@ -570,7 +570,52 @@ print(f"Vocab size: {tokenizer.get_vocab_size()}")
 | `llama.pool_mode` | `last_token` / `mean` / `cls` |
 | `loss_fn.name` | `sft_cross_loss` / `sft_focal_loss_weight` / `sft_focal_loss_with_amount`（默认）/ `sft_pAUC_sigmoid_loss` |
 | `lora.target_modules` 默认 | `["q_proj", "v_proj"]` |
+| `strategy.name` | `single`（默认）/ `ddp`（多机多卡用） |
+| `data_config.shard_mode` | `sampler`（默认，DistributedSampler）/ `file`（与 risk_control_2 一致，文件分片） |
 | 输出 | `models/routec/ckpt_step*.pt`、`log/routec/<step>_val_prob.json`（每用户概率） |
+
+### 多机多卡部署
+
+> Route C 内置 torch native DDP（无 DeepSpeed 依赖）；Route A 走 NeMo FSDP2。
+> 单卡入口完全向后兼容——未设 LOCAL_RANK 环境变量时 `step_06` 自动退化为单进程。
+
+**单机多卡 Route C**：
+```bash
+NGPUS=8 bash scripts/routec_ddp_single_node.sh
+# 或手动：
+torchrun --nproc-per-node=8 --master-port=29500 \
+    scripts/step_06_finetune_routec.py \
+    --config configs/routec/default_multinode.json
+```
+
+**多机多卡 Route C**（每个节点各起一份，仅 `NNODE_RANK` 不同）：
+```bash
+# node 0 (master)
+NNODES=2 NNODE_RANK=0 NGPUS=8 MASTER_ADDR=10.0.0.1 MASTER_PORT=29500 \
+    bash scripts/routec_ddp_multi_node.sh
+
+# node 1
+NNODES=2 NNODE_RANK=1 NGPUS=8 MASTER_ADDR=10.0.0.1 MASTER_PORT=29500 \
+    bash scripts/routec_ddp_multi_node.sh
+```
+
+**多机多卡 Route A（NeMo FSDP2）**：
+```bash
+# 在每个节点上跑（仅 NODE_RANK 不同）。NeMo 自动从 world_size 推 FSDP2 dp_size。
+torchrun --nproc-per-node=8 --nnodes=2 --node-rank=$NODE_RANK \
+    --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
+    scripts/step_03_train_model.py --variant yl --max-steps 3000
+```
+
+数据分片：
+- **`shard_mode: "sampler"`**（小数据 / 默认）：torch `DistributedSampler` 切分
+- **`shard_mode: "file"`**（大数据 / 千万用户级）：每个 rank 仅读 `record_idx % world_size == rank` 的 NDJSON record，与 risk_control_2 一致
+
+关键约束（多机）：
+1. **每个节点的 python/torch/transformers/peft 版本必须一致**（建议同一个 docker 镜像）
+2. **`models/decoder-yl/` checkpoint 与 `data/yl/yl_tokenizer.json` 必须每个节点 path-reachable**（NFS 或 rsync）
+3. **`MASTER_ADDR` 必须是所有节点都能解析的 IP**（master 节点的主网卡 IP）
+4. **训练前每节点先 `docker login nvcr.io` 拉镜像**（参考 README §"手动 docker build")
 
 | 步骤 | CPU | GPU | 说明 |
 |------|-----|-----|------|

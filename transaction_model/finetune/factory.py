@@ -9,10 +9,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from transaction_model.finetune.config import RouteCConfig
+from transaction_model.finetune.data import (
+    SftIterableDataset, SftNDJsonDataset, prepare_collate,
+)
+from transaction_model.finetune.distributed import get_rank, get_world_size
 from transaction_model.finetune.models import (
     ClassifierHead, CombinedModel, GPT2SeqEncoder, LlamaEncoder,
 )
-from transaction_model.finetune.data import SftNDJsonDataset, prepare_collate
 from transaction_model.finetune.trainer import Trainer, TrainConfig
 from transaction_model.tokenizer import YLTabularTokenizer
 
@@ -79,6 +82,12 @@ def build_datasets(
 ) -> Tuple[DataLoader, DataLoader]:
     """构造 train/val DataLoader。
 
+    由 `data_config.shard_mode` 决定数据分片方式：
+      - "sampler"（默认）: map-style SftNDJsonDataset + DistributedSampler
+                          → 小数据稳，所有 rank 看到全局 index（仅重复采样）
+      - "file"          : iterable SftIterableDataset，按 record_idx % world_size == rank
+                          → 与 risk_control_2 一致，大数据更高效
+
     `data_config.folder` 既可以是单个 NDJSON 也可以是目录（取所有 .jsonl）。
     val 暂时复用同一份数据（冒烟测试用）；正式训练时分离 val_folder。
     """
@@ -92,40 +101,84 @@ def build_datasets(
 
     train_folder = Path(dc.get("folder", "data/yl/raw"))
     val_folder = Path(dc.get("val_folder", train_folder))
+    shard_mode = dc.get("shard_mode", "sampler")
+    rank = get_rank()
+    world_size = get_world_size()
+    is_dist = world_size > 1
 
     def find_jsonls(d: Path):
         if d.is_file():
             return [d]
         return sorted(d.glob("*.jsonl"))
 
-    def build_loader(folder: Path, name: str) -> DataLoader:
+    def _common_kwargs() -> dict:
+        return dict(
+            pipeline=pipeline, vocab=vocab,
+            pad_token_id=pad, bos_token_id=bos,
+            eos_token_id=eos, sep_token_id=sep,
+            max_txn_len=dc.get("max_txn_len", 32),
+            minleng=dc.get("minleng", 1),
+            max_hiswindow=dc.get("hiswindow", 512),
+        )
+
+    def build_loader(folder: Path, name: str, is_train: bool) -> DataLoader:
         files = find_jsonls(folder)
         if not files:
             raise FileNotFoundError(f"No .jsonl under {folder} for {name}")
-        # 合并多个 NDJSON 文件到一个 Dataset
+
+        if shard_mode == "file":
+            # IterableDataset + 文件分片：不需要 DistributedSampler
+            iterables = []
+            for p in files:
+                iterables.append(SftIterableDataset(
+                    ndjson_path=p,
+                    **_common_kwargs(),
+                    rank=rank,
+                    world_size=world_size,
+                    repeat=is_train,    # 训练循环到 max_steps；val 只跑一轮
+                ))
+            ds = _ConcatIterable(iterables)
+            return DataLoader(
+                ds,
+                batch_size=dc.get("batch_size", 12),
+                collate_fn=prepare_collate(pad, dc.get("hiswindow", 512)),
+                num_workers=0,
+            )
+
+        # map-style + DistributedSampler
         ds = None
         for p in files:
             sub = SftNDJsonDataset(
                 ndjson_path=p,
-                pipeline=pipeline,
-                vocab=vocab,
-                pad_token_id=pad, bos_token_id=bos,
-                eos_token_id=eos, sep_token_id=sep,
-                max_txn_len=dc.get("max_txn_len", 32),
-                minleng=dc.get("minleng", 1),
-                max_hiswindow=dc.get("hiswindow", 512),
+                **_common_kwargs(),
             )
             ds = sub if ds is None else _ConcatDatasetLike([ds, sub])
-        return DataLoader(
+
+        sampler = None
+        shuffle = is_train
+        if is_dist:
+            from torch.utils.data.distributed import DistributedSampler
+            sampler = DistributedSampler(
+                ds, num_replicas=world_size, rank=rank,
+                shuffle=is_train, drop_last=is_train,
+            )
+            shuffle = False  # sampler 已负责 shuffle
+
+        loader = DataLoader(
             ds,
             batch_size=dc.get("batch_size", 12),
-            shuffle=(name == "train"),
+            shuffle=shuffle,
+            sampler=sampler,
             collate_fn=prepare_collate(pad, dc.get("hiswindow", 512)),
             num_workers=0,
         )
+        # 给 trainer 用：set_epoch 需要在每个 epoch 调用
+        loader.sampler = sampler
+        loader.is_distributed = is_dist
+        return loader
 
-    train_loader = build_loader(train_folder, "train")
-    val_loader = build_loader(val_folder, "val")
+    train_loader = build_loader(train_folder, "train", is_train=True)
+    val_loader = build_loader(val_folder, "val", is_train=False)
     return train_loader, val_loader
 
 
@@ -143,12 +196,36 @@ class _ConcatDatasetLike(torch.utils.data.Dataset):
         return self._inner[i]
 
 
+class _ConcatIterable(torch.utils.data.IterableDataset):
+    """拼接多个 IterableDataset，按顺序逐个迭代。"""
+
+    def __init__(self, datasets):
+        self._datasets = datasets
+
+    def __iter__(self):
+        for d in self._datasets:
+            for sample in d:
+                yield sample
+
+    def __len__(self):
+        return sum(len(d) for d in self._datasets)
+
+
 def build_trainer(
-    cfg: RouteCConfig, model: CombinedModel, device: str = "cuda",
+    cfg: RouteCConfig,
+    model: CombinedModel,
+    device: str = "cuda",
+    rank: int = 0,
+    world_size: int = 1,
+    local_rank: int = 0,
 ) -> Trainer:
-    """从 cfg 装配 Trainer。loss_fn/optimizer/scheduler 都在 Trainer 内部初始化。"""
+    """从 cfg 装配 Trainer。loss_fn/optimizer/scheduler 都在 Trainer 内部初始化。
+
+    rank/world_size/local_rank 透传给 Trainer，DDP 包装在 Trainer 内部完成。
+    """
     ss = cfg.step_scheduler or {}
     paths = cfg.paths or {}
+    strat = cfg.strategy or {}
     tc = TrainConfig(
         max_steps=ss.get("max_steps", 5000),
         grad_accum_steps=ss.get("grad_accum_steps", 1),
@@ -165,6 +242,7 @@ def build_trainer(
         seed=ss.get("seed", 42),
         save_dir=paths.get("save_ckpt", "models/routec"),
         log_dir=paths.get("logging_path", "log/routec"),
+        find_unused_parameters=strat.get("find_unused_parameters", True),
     )
     loss_cfg = cfg.loss_fn or {"name": "sft_focal_loss_with_amount"}
     return Trainer(
@@ -173,4 +251,7 @@ def build_trainer(
         loss_name=loss_cfg["name"],
         loss_params=loss_cfg.get("params", {}),
         device=device,
+        rank=rank,
+        world_size=world_size,
+        local_rank=local_rank,
     )

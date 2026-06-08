@@ -13,9 +13,30 @@ def get_python_executable() -> str:
     return sys.executable
 
 
-def get_torchrun_cmd(nproc: int = 8) -> list[str]:
-    """生成 torchrun 命令前缀"""
-    return ["torchrun", f"--nproc-per-node={nproc}"]
+def get_torchrun_cmd(
+    nproc: int = 8,
+    nnodes: int | None = None,
+    node_rank: int | None = None,
+    master_addr: str | None = None,
+    master_port: int | None = None,
+) -> list[str]:
+    """生成 torchrun 命令前缀（支持多机多卡）。
+
+    单机多卡（默认）：`torchrun --nproc-per-node=N`
+    多机多卡：传 `nnodes, node_rank, master_addr, master_port` 即可：
+        `torchrun --nproc-per-node=N --nnodes=M --node-rank=R
+                 --master-addr=A --master-port=P`
+    """
+    cmd = ["torchrun", f"--nproc-per-node={nproc}"]
+    if nnodes is not None:
+        cmd.append(f"--nnodes={nnodes}")
+    if node_rank is not None:
+        cmd.append(f"--node-rank={node_rank}")
+    if master_addr is not None:
+        cmd.append(f"--master-addr={master_addr}")
+    if master_port is not None:
+        cmd.append(f"--master-port={master_port}")
+    return cmd
 
 
 def build_train_command(

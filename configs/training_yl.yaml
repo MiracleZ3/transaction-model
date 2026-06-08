@@ -65,13 +65,24 @@ step_scheduler:
   max_steps: 3000
 
 # -- Distribution ----------------------------------------------------------
+# 多机多卡 (multi-node) 说明：
+#   NeMo AutoModel + FSDP2 自动从 torchrun 注入的 RANK/WORLD_SIZE/LOCAL_RANK
+#   推断 world_size，本配置无需显式声明总 GPU 数。
+#
+# 多机启动命令（每个节点跑一份，NNODE_RANK 不同）：
+#   torchrun --nproc-per-node=8 --nnodes=4 --node-rank=$NODE_RANK \
+#       --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \
+#       scripts/step_03_train_model.py --variant yl
+#
+# 若显存不够，把 dp_size 设成 none（默认）让 NeMo 自动按 world_size 全部用于 dp。
+# 若想 TP/CP，把 tp_size / cp_size 设成对应值（NeMo 自动 shards）。
 dist_env:
   backend: nccl
-  timeout_minutes: 5
+  timeout_minutes: 60    # 多机跨网较慢，从 5 上调到 60
 
 distributed:
   _target_: nemo_automodel.components.distributed.fsdp2.FSDP2Manager
-  dp_size: none
+  dp_size: none          # none = NeMo 自动推断（推荐多机用）
   dp_replicate_size: 1
   tp_size: 1
   cp_size: 1
