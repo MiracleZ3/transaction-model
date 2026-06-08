@@ -25,10 +25,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# GPU 加速三件套（RAPIDS）。这些 wheel 只发布在 NVIDIA 的 PyPI 索引上，
+# 因此安装时必须带上 --extra-index-url：
+#   pip install -e ".[gpu]" --extra-index-url https://pypi.nvidia.com
+# 包名带 -cu12 后缀（不是裸 cudf/cuml/cupy）；RAPIDS 24.x 覆盖 Python 3.9–3.12。
 gpu = [
-    "cudf>=24.0",
-    "cuml>=24.0",
-    "cupy>=13.0",
+    "cudf-cu12>=24.10",
+    "cuml-cu12>=24.10",
+    "cupy-cuda12x>=13.0",
 ]
 nemo = [
     "nemo-automodel>=0.1",

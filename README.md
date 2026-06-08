@@ -72,7 +72,7 @@ transaction-model/
 
 | 组件 | 最低版本 | 说明 |
 |------|---------|------|
-| Python | >= 3.9 | 已测试 3.13.5 |
+| Python | >= 3.9 | CPU 流程已测试 3.13.5；GPU 流程（RAPIDS）建议 3.11，已测试 3.11 |
 | CUDA | 12.x | 仅训练/推理时需要，数据管道支持纯 CPU |
 | PyTorch | >= 2.1 | |
 | Transformers | >= 4.40 | |
@@ -86,7 +86,8 @@ transaction-model/
 pip install -e .
 
 # GPU 加速 (可选，数据加载和 UMAP)
-pip install -e ".[gpu]"
+# RAPIDS wheel 只发布在 NVIDIA 索引上，必须带 --extra-index-url
+pip install -e ".[gpu]" --extra-index-url https://pypi.nvidia.com
 
 # NeMo 训练框架 (可选，仅训练步骤需要)
 pip install -e ".[nemo]"

@@ -16,7 +16,7 @@ install-dev:
 	pip install -e ".[dev]"
 
 install-gpu:
-	pip install -e ".[gpu]"
+	pip install -e ".[gpu]" --extra-index-url https://pypi.nvidia.com
 
 install-nemo:
 	pip install -e ".[nemo]"

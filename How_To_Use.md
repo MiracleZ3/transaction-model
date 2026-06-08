@@ -66,7 +66,8 @@ cd transaction-model
 pip install -e .
 
 # GPU 加速（cuDF 数据加载 + cuML UMAP）
-pip install -e ".[gpu]"
+# RAPIDS wheel 只发布在 NVIDIA 索引上，必须带 --extra-index-url
+pip install -e ".[gpu]" --extra-index-url https://pypi.nvidia.com
 
 # NeMo 训练框架（仅 Step 3 需要）
 pip install -e ".[nemo]"
@@ -542,7 +543,7 @@ python scripts/step_05_fraud_detection.py
 ### B.1 "我只想看看 demo 效果"
 
 ```bash
-pip install -e ".[nemo,gpu]"
+pip install -e ".[nemo,gpu]" --extra-index-url https://pypi.nvidia.com
 python scripts/run_pipeline.py --steps all --demo
 ```
 
@@ -550,7 +551,7 @@ python scripts/run_pipeline.py --steps all --demo
 
 ```bash
 # 1. 把模型放到 models/decoder-foundation-model/
-pip install -e ".[gpu]"
+pip install -e ".[gpu]" --extra-index-url https://pypi.nvidia.com
 make all-pretrained
 ```
 
