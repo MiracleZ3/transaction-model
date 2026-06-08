@@ -24,12 +24,14 @@ from transaction_model.data.ndjson_loader import (
 )
 
 
-# tests/test_ndjson_loader.py → tests/ → transaction-model/ → 银联风控/
-SAMPLE_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "new_ylformer" / "data_sample"
-)
-SAMPLE_FILE = SAMPLE_DIR / "data_sample.jsonl"
+# tests/test_ndjson_loader.py → tests/ → transaction-model/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# 优先用仓库内置的 examples/sample_data/smoke.jsonl（clone 后即可跑）；
+# 若不存在则回退到工作区外的 new_ylformer/sample（本地开发时）。
+INREPO_SAMPLE = PROJECT_ROOT / "examples" / "sample_data" / "smoke.jsonl"
+EXTERNAL_SAMPLE = PROJECT_ROOT.parent / "new_ylformer" / "data_sample" / "data_sample.jsonl"
+SAMPLE_FILE = INREPO_SAMPLE if INREPO_SAMPLE.exists() else EXTERNAL_SAMPLE
 
 
 def _sample_available() -> bool:
@@ -128,12 +130,24 @@ def test_short_trans_raises(tmp_path):
 
 
 def test_real_sample_if_available():
-    """如果 ../new_ylformer/data_sample 可达，跑一次真实加载冒烟测试。"""
+    """加载仓库内置的 smoke.jsonl（或外部 sample 兜底）做冒烟测试。"""
+    import json as _j
     if not _sample_available():
-        pytest.skip("Real sample data not available outside the workspace.")
+        pytest.skip("No sample data found.")
     df = load_ndjson(SAMPLE_FILE, use_gpu=False)
     assert len(df) > 0
     assert YL_USER_KEY in df.columns
     # 字段下标 18（受卡方名称地址）与 19（金额）必须存在
     assert "cups_受卡方名称地址" in df.columns
     assert "cups_交易金额" in df.columns
+    # 字段 0..19 都应在列里
+    for idx in range(YL_TRANS_FIELDS_LEN):
+        assert YL_FIELDS_POS[idx] in df.columns
+    # 行数应等于 sample 内所有用户交易数之和
+    with open(SAMPLE_FILE) as f:
+        records = [_j.loads(l) for l in f if l.strip()]
+    assert len(df) == sum(len(r[YL_TRANS_KEY]) for r in records)
+    # 仓库内置 fixture 应同时含正负样本；外部 sample 可能只有 1 类（放宽要求）
+    if INREPO_SAMPLE.exists() and YL_LABEL_KEY in df.columns:
+        assert df[YL_LABEL_KEY].nunique() >= 2, "smoke fixture must have >=2 label classes"
+
