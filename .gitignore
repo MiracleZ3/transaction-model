@@ -1,9 +1,9 @@
-# Data
-data/
-!data/.gitkeep
+# Data（仅项目根目录的 data/ 是数据缓存，子目录里的 data/ 是 Python 包）
+/data/
+!/data/.gitkeep
 
-# Models (large files)
-models/
+# Models (large files, 仅项目根目录的 models/ 是检查点缓存)
+/models/
 
 # Python
 __pycache__/
