@@ -141,43 +141,67 @@ def load_and_align_raw_features(
     val_row_ids: np.ndarray,
     test_row_ids: np.ndarray,
     config_name: str = "dataset",
+    dataset_config_name: str | None = None,
 ) -> tuple:
     """加载原始特征并对齐到嵌入分割
+
+    Args:
+        y_train: train 嵌入对应的标签（仅用于估平衡采样总数）
+        train_row_ids, val_row_ids, test_row_ids: 各 split 的行 id
+        config_name: 包含 feature_cols 的配置名（向后兼容默认 "dataset"）
+        dataset_config_name: 数据集配置名；非 None 时优先用它，
+            用于区分 "dataset" (TabFormer) 与 "dataset_yl" (银联 NDJSON)
 
     Returns:
         (X_train_raw, X_val_raw, X_test_raw) pandas DataFrame
     """
-    ds_cfg = load_config(config_name)
-    feature_cols = ds_cfg["feature_cols"]
-    temporal_dir = resolve_path(ds_cfg["dataset"]["temporal_split_dir"])
+    # 选择 hd jd：dataset_yl 优先于 config_name
+    eff_name = dataset_config_name or config_name
+    ds_full = load_config(eff_name)
+    ds_cfg = ds_full["dataset"]
+    feature_cols = ds_full["feature_cols"]
+    temporal_dir = resolve_path(ds_cfg["temporal_split_dir"])
+
+    is_yl = ds_full.get("tokenizer", {}).get("variant") == "yl"
+    label_col = ds_cfg.get("label_col", "Is Fraud?")
+    cert_col = ds_cfg.get("cert_col", "cert_sm3")
 
     print("Loading temporal split parquets...")
-    train_gdf = load_parquet(temporal_dir / "train.parquet")
-    val_gdf = load_parquet(temporal_dir / "val_eval.parquet")
-    test_gdf = load_parquet(temporal_dir / "test_eval.parquet")
+    if is_yl:
+        # YL: 三个 split 文件名都是 {split}.parquet
+        train_path = temporal_dir / "train.parquet"
+        val_path = temporal_dir / "val.parquet"
+        test_path = temporal_dir / "test.parquet"
+    else:
+        train_path = temporal_dir / "train.parquet"
+        val_path = temporal_dir / "val_eval.parquet"
+        test_path = temporal_dir / "test_eval.parquet"
+    train_gdf = load_parquet(train_path)
+    val_gdf = load_parquet(val_path)
+    test_gdf = load_parquet(test_path)
 
-    # 特征工程
-    for gdf in [train_gdf, val_gdf, test_gdf]:
-        engineer_features(gdf)
+    # 特征工程：TabFormer 走原有的 Hour/Amount/_target；
+    # YL 派生字段已在 NDJSON 加载阶段生成为 cups_* 列，统一跳过 engineer_features。
+    if not is_yl:
+        for gdf in [train_gdf, val_gdf, test_gdf]:
+            engineer_features(gdf)
 
     # 转换为 pandas
-    if hasattr(train_gdf, 'to_pandas'):
-        train_pdf = train_gdf.to_pandas()
-    else:
-        train_pdf = train_gdf
-    if hasattr(val_gdf, 'to_pandas'):
-        val_pdf = val_gdf.to_pandas()
-    else:
-        val_pdf = val_gdf
-    if hasattr(test_gdf, 'to_pandas'):
-        test_pdf = test_gdf.to_pandas()
-    else:
-        test_pdf = test_gdf
+    def _to_pandas(gdf):
+        return gdf.to_pandas() if hasattr(gdf, "to_pandas") else gdf
+
+    train_pdf = _to_pandas(train_gdf)
+    val_pdf = _to_pandas(val_gdf)
+    test_pdf = _to_pandas(test_gdf)
 
     # 重建平衡训练样本
-    fraud_col = "Is Fraud?"
     BALANCED_TOTAL = len(y_train)
-    fraud_mask = (train_pdf[fraud_col] == "Yes") | (train_pdf[fraud_col] == "1")
+
+    if is_yl:
+        # YL: 用户级标签广播到行后已存于 label_col 列，按它做正负采样
+        fraud_mask = train_pdf[label_col].astype(int) == 1
+    else:
+        fraud_mask = (train_pdf["Is Fraud?"] == "Yes") | (train_pdf["Is Fraud?"] == "1")
     fraud_idx = train_pdf.index[fraud_mask].tolist()
     normal_idx = train_pdf.index[~fraud_mask].tolist()
 
@@ -190,7 +214,10 @@ def load_and_align_raw_features(
     ])
     np.random.shuffle(balanced_idx)
 
-    X_train_raw = train_pdf.loc[balanced_idx, feature_cols].reset_index(drop=True).iloc[train_row_ids].reset_index(drop=True)
+    X_train_raw = (
+        train_pdf.loc[balanced_idx, feature_cols].reset_index(drop=True)
+        .iloc[train_row_ids].reset_index(drop=True)
+    )
     X_val_raw = val_pdf.iloc[val_row_ids][feature_cols].reset_index(drop=True)
     X_test_raw = test_pdf.iloc[test_row_ids][feature_cols].reset_index(drop=True)
 
@@ -199,13 +226,19 @@ def load_and_align_raw_features(
 
 def run_three_model_comparison(
     config_name: str = "xgboost",
+    dataset_config_name: str = "dataset",
 ) -> dict:
     """执行三模型 XGBoost 对比实验
 
     模型：
-    1. Baseline: 13d 原始特征
-    2. Embeddings: 64d PCA 嵌入
-    3. Combined: 13d 原始 + 64d PCA 嵌入
+    1. Baseline: 原始特征（TabFormer 13d / YL cups_* 列）
+    2. Embeddings: PCA 嵌入
+    3. Combined: 原始 + PCA 嵌入
+
+    Args:
+        config_name: XGBoost/推理配置名
+        dataset_config_name: 数据集配置名 — "dataset" (TabFormer) 或
+            "dataset_yl" (银联 NDJSON)。
 
     Returns:
         {'baseline': ..., 'embed': ..., 'combined': ..., 'clfs': {...}}
@@ -232,6 +265,7 @@ def run_three_model_comparison(
     # 3. 加载原始特征
     X_train_raw, X_val_raw, X_test_raw = load_and_align_raw_features(
         y_train, train_row_ids, val_row_ids, test_row_ids,
+        dataset_config_name=dataset_config_name,
     )
 
     # 4. 编码类别特征

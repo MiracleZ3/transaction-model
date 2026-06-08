@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -104,22 +104,38 @@ def load_corpus_and_tokenize(
     data_path: Union[str, Path],
     merchant_hash_size: int = 2000,
     seq_length: int = 4096,
+    tokenizer_variant: str = "tabformer",
+    tokenizer_state_path: Optional[str] = None,
 ) -> FinancialCLMDataset:
     """Load a text corpus file and build a FinancialCLMDataset.
 
     Each line in the corpus is a space-separated token string like:
         <bos> AMT_3 MERCH_1498 CAT_RETAIL ... <sep> AMT_1 ... <eos>
-    """
-    from transaction_model.tokenizer.financial_tokenizer import FinancialTabularTokenizer
 
-    tokenizer = FinancialTabularTokenizer(
+    Parameters
+    ----------
+    data_path : str | Path
+        Corpus text file path (one sequence per line).
+    merchant_hash_size : int
+        TabFormer 路线的商户 hash 大小（仅 variant="tabformer" 使用）。
+    seq_length : int
+        Padding / truncation length per sequence.
+    tokenizer_variant : {"tabformer", "yl"}
+        "tabformer"（默认）→ FinancialTabularTokenizer（静态词表）；
+        "yl" → YLTabularTokenizer，必须配合已 fit 保存的 state 文件
+        （tokenizer_state_path）使用。
+    tokenizer_state_path : str, optional
+        variant="yl" 时必填：上一阶段 ``YLTabularTokenizer.save`` 输出的 JSON
+        路径。对应 ``configs/dataset_yl.yaml::tokenizer.state_path``。
+    """
+    tokenizer = _build_tokenizer(
+        variant=tokenizer_variant,
         merchant_hash_size=merchant_hash_size,
-        category_hierarchy=True,
-        temporal_encoding=True,
+        tokenizer_state_path=tokenizer_state_path,
     )
 
     data_path = Path(data_path)
-    print(f"Loading corpus from {data_path}...")
+    print(f"Loading corpus from {data_path} (variant={tokenizer_variant})...")
 
     sequences = []
     with open(data_path, "r") as f:
@@ -130,7 +146,8 @@ def load_corpus_and_tokenize(
             token_ids = tokenizer.encode(line, max_length=seq_length)
             sequences.append(token_ids)
 
-    print(f"  Loaded {len(sequences):,} sequences (seq_length={seq_length})")
+    print(f"  Loaded {len(sequences):,} sequences (seq_length={seq_length}, "
+          f"vocab_size={tokenizer.get_vocab_size()})")
 
     return FinancialCLMDataset(
         sequences=sequences,
@@ -139,10 +156,45 @@ def load_corpus_and_tokenize(
     )
 
 
+def _build_tokenizer(
+    variant: str,
+    merchant_hash_size: int = 2000,
+    tokenizer_state_path: Optional[str] = None,
+):
+    """按 variant 选择 tokenizer（TabFormer 静态 / YL 已 fit state）。"""
+    if variant == "tabformer":
+        from transaction_model.tokenizer.financial_tokenizer import (
+            FinancialTabularTokenizer,
+        )
+
+        return FinancialTabularTokenizer(
+            merchant_hash_size=merchant_hash_size,
+            category_hierarchy=True,
+            temporal_encoding=True,
+        )
+
+    if variant == "yl":
+        if tokenizer_state_path is None:
+            raise ValueError(
+                "tokenizer_variant='yl' requires tokenizer_state_path "
+                "(point it at configs/dataset_yl.yaml::tokenizer.state_path)"
+            )
+        from transaction_model.tokenizer.yl_tokenizer import YLTabularTokenizer
+
+        return YLTabularTokenizer.from_file(tokenizer_state_path)
+
+    raise ValueError(
+        f"Unknown tokenizer_variant: {variant!r}. "
+        f"Expected 'tabformer' or 'yl'."
+    )
+
+
 def build_financial_clm_dataset(
     data_path: str,
     merchant_hash_size: int = 2000,
     seq_length: int = 4096,
+    tokenizer_variant: str = "tabformer",
+    tokenizer_state_path: Optional[str] = None,
     **kwargs,
 ) -> FinancialCLMDataset:
     """Entry point for NeMo AutoModel YAML config.
@@ -151,9 +203,14 @@ def build_financial_clm_dataset(
     ``_target_``. Any extra keys in the YAML dataset section are passed
     as ``**kwargs`` and silently ignored, ensuring forward compatibility
     with new config keys.
+
+    Pass ``tokenizer_variant: "yl"`` and ``tokenizer_state_path`` in the
+    YAML dataset section to train on YL (银联) corpus.
     """
     return load_corpus_and_tokenize(
         data_path=data_path,
         merchant_hash_size=merchant_hash_size,
         seq_length=seq_length,
+        tokenizer_variant=tokenizer_variant,
+        tokenizer_state_path=tokenizer_state_path,
     )

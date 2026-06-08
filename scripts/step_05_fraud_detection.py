@@ -11,9 +11,13 @@ from transaction_model.visualization.results_viz import plot_model_comparison
 def main():
     parser = argparse.ArgumentParser(description="Step 05: Fraud Detection")
     parser.add_argument("--no-plot", action="store_true", help="跳过可视化")
+    parser.add_argument(
+        "--dataset-config", default="dataset",
+        help="数据集配置名（dataset 走 TabFormer；dataset_yl 走银联 NDJSON）",
+    )
     args = parser.parse_args()
 
-    results = run_three_model_comparison()
+    results = run_three_model_comparison(dataset_config_name=args.dataset_config)
 
     if not args.no_plot:
         pca_dim = results["pca_dim"]

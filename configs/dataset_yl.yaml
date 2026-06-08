@@ -1,0 +1,62 @@
+# 银联风控 NDJSON 数据集配置（route A：最小侵入式适配器）
+#
+# 与 configs/dataset.yaml（TabFormer CSV）共存，通过 dataset_config_name 切换。
+# 用法：
+#   python scripts/step_01b_load_ndjson.py          # NDJSON → 每行一笔交易 parquet
+#   python scripts/step_02_tokenize_ndjson.py        # parquet → tokenized corpus
+#   python scripts/step_03_train_model.py --variant yl
+#   python scripts/step_04_extract_embeddings.py --dataset-config dataset_yl
+#   python scripts/step_05_fraud_detection.py --dataset-config dataset_yl
+
+dataset:
+  source: "ndjson"
+  ndjson_dir: "data/yl/raw"                              # NDJSON 分片目录
+  temporal_split_dir: "data/yl/temporal_split"           # 展开后行级 parquet 输出
+  cert_col: "cert_sm3"                                   # 用户标识列
+  label_col: "label"                                     # 用户级标签列
+  amount_idx: 19                                         # 金额在 trans 数组的下标
+
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  # test_ratio 自动推断为 1 - train - val
+
+sampling:
+  balanced_train_size: 1000000
+  random_state: 42
+
+tokenizer:
+  variant: "yl"
+  merchant_hash_size: 4000
+  merch_name_hash_size: 20000                            # 受卡方名称文本桶（对齐旧 vocab num_class）
+  amount_strategy: "quantile"                            # 数据驱动分桶
+  amount_bins: 20                                        # 对齐旧 feature_config num_class=20
+  include_time_delta: true                               # 补偿无 GPT2 频率编码
+  time_delta_bins: 32
+  chunk_size: 315
+  context_window: 4096
+  state_path: "data/yl/yl_tokenizer.json"                # fit 后保存的 vocab state
+
+corpus:
+  output_dir: "data/yl/decoder_corpus"
+  train: "data/yl/decoder_corpus/train_corpus.txt"
+  val: "data/yl/decoder_corpus/val_corpus.txt"
+  test: "data/yl/decoder_corpus/test_corpus.txt"
+
+# 原始特征 baseline：把展开后的主要 cups_* 字段当作 XGBoost baseline 输入
+# （数值/类别特征；OrdinalEncoder 会处理字符串字段）
+feature_cols:
+  - cups_发卡机构地址
+  - cups_发卡机构银行
+  - cups_卡等级
+  - cups_收单机构地址
+  - cups_收单机构银行
+  - cups_交易代码
+  - cups_交易渠道
+  - cups_服务点输入方式
+  - cups_应答码
+  - cups_商户类型
+  - cups_连接方式
+  - cups_交易金额
+  - cups_星期
+  - cups_时间段

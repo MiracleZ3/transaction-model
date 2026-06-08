@@ -1,0 +1,114 @@
+# YL（银联 risk_control_2 / ylformer）Foundation Model Pretraining — Decoder-Only
+#
+# 训练前必须先：
+#   1. python scripts/step_01b_load_ndjson.py        # NDJSON → parquet
+#   2. python scripts/step_02_tokenize_ndjson.py     # parquet → corpus + tokenizer state
+#
+# 第一次跑 step_02 后，把它打印出的 vocab_size 写回本文件的 model.config.vocab_size。
+# 因为 YLPipeline 的词表是数据驱动 fit 的，无法静态计算。
+
+# -- Model ----------------------------------------------------------------
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.LlamaConfig
+    vocab_size: 26000          # 占位：跑完 step_02 后用实际 vocab_size 覆盖
+    hidden_size: 512
+    num_hidden_layers: 8
+    num_attention_heads: 8
+    num_key_value_heads: 2     # GQA: 4:1 ratio
+    intermediate_size: 1408    # SwiGLU FFN
+    max_position_embeddings: 8192
+    rope_theta: 500000.0
+    hidden_act: silu
+    rms_norm_eps: 1.0e-5
+    attention_dropout: 0.0
+    tie_word_embeddings: false
+    bos_token_id: 1
+    eos_token_id: 2
+    pad_token_id: 0
+
+# -- Training Dataset (YL) -------------------------------------------------
+# tokenizer_variant + tokenizer_state_path 透传给 build_financial_clm_dataset
+dataset:
+  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  data_path: null
+  merchant_hash_size: 4000              # 仅 tabformer 用；yl 下被忽略
+  seq_length: 4096
+  tokenizer_variant: "yl"
+  tokenizer_state_path: "data/yl/yl_tokenizer.json"
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: torch.utils.data.default_collate
+
+# -- Validation Dataset (YL) -----------------------------------------------
+validation_dataset:
+  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  data_path: null
+  merchant_hash_size: 4000
+  seq_length: 4096
+  tokenizer_variant: "yl"
+  tokenizer_state_path: "data/yl/yl_tokenizer.json"
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: torch.utils.data.default_collate
+
+# -- Training Schedule -----------------------------------------------------
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 16
+  ckpt_every_steps: 15
+  val_every_steps: 15
+  num_epochs: 20
+  max_steps: 3000
+
+# -- Distribution ----------------------------------------------------------
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+distributed:
+  _target_: nemo_automodel.components.distributed.fsdp2.FSDP2Manager
+  dp_size: none
+  dp_replicate_size: 1
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+
+# -- Loss ------------------------------------------------------------------
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# -- Optimizer -------------------------------------------------------------
+optimizer:
+  _target_: torch.optim.AdamW
+  betas: [0.9, 0.95]
+  lr: 0.0002
+  weight_decay: 0.077
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 10
+  min_lr: 0.0000065
+
+# -- RNG -------------------------------------------------------------------
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+# -- Checkpointing ---------------------------------------------------------
+checkpoint:
+  enabled: true
+  checkpoint_dir: "models/decoder-yl/checkpoints/"
+  model_save_format: safetensors
+  save_consolidated: true
+  model_repo_id: yl-financial-decoder
+
+# -- Paths ----------------------------------------------------------------
+paths:
+  pretrained_model: "models/decoder-yl"
+  train_corpus: "data/yl/decoder_corpus/train_corpus.txt"
+  val_corpus: "data/yl/decoder_corpus/val_corpus.txt"

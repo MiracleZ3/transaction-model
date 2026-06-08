@@ -63,7 +63,7 @@ def generate_corpus(
 
     # 识别分组列
     group_cols = []
-    for col_name in ["user", "User", "cust"]:
+    for col_name in ["user", "User", "cust", "cert_sm3"]:
         if col_name in gdf_proc.columns:
             group_cols.append(col_name)
             break
