@@ -205,6 +205,16 @@ python scripts/step_05_fraud_detection.py               # 欺诈检测对比
 
 本项目的配置驱动设计使得迁移到新的交易数据集非常简单。以下是需要修改的文件和步骤:
 
+> **银联风控 NDJSON 数据**（risk_control_2 风格）有两条专属路线，详见
+> [`upgrade/ylformer.md`](upgrade/ylformer.md)：
+> - **路线 A**：NDJSON → tokenized corpus → 现有 NeMo + Llama decoder CLM
+>   (`scripts/step_01b_load_ndjson.py` + `scripts/step_02_tokenize_ndjson.py`
+>    + `scripts/step_03_train_model.py --variant yl`)
+> - **路线 C**：Llama（route A 预训）+ GPT2（cross-txn 序列）+ 分类头 +
+>   业务损失（金额加权 focal / pAUC）→
+>   `python scripts/step_06_finetune_routec.py --config configs/routec/default.json`
+>   （需要 route A 的预训 checkpoint 与 `data/yl/yl_tokenizer.json`）
+
 ### 1. 准备数据
 
 将你的 CSV 数据放置到 `data/` 目录下，确保包含以下核心列（或根据实际情况调整）:

@@ -32,6 +32,9 @@ plotly>=5.18
 # liger-kernel
 # torchdata>=0.7            # NeMo 调用的 StatefulDataLoader
 
+# Route C: Llama+GPT2 混合微调（LoRA 注入需要 peft）
+peft>=0.10
+
 # 工具
 pyyaml>=6.0
 tqdm>=4.65

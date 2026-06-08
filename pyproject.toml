@@ -39,6 +39,11 @@ nemo = [
     "liger-kernel",
     "torchdata>=0.7",
 ]
+routec = [
+    # Route C: Llama+GPT2 混合下游微调（LoRA + 业务损失）
+    "peft>=0.10",
+    "transformers>=4.46",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

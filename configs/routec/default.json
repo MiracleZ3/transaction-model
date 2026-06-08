@@ -1,0 +1,75 @@
+{
+  "train_name": "routec_yl",
+  "task_type": "lora",
+
+  "llama": {
+    "model_path": "models/decoder-yl",
+    "hidden_size": 512,
+    "pool_mode": "last_token",
+    "pad_token_id": 0
+  },
+
+  "lora": {
+    "r": 8,
+    "alpha": 32,
+    "dropout": 0.05,
+    "bias": "none",
+    "target_modules": ["q_proj", "v_proj"]
+  },
+
+  "gpt2": {
+    "bert_hidden_size": 512,
+    "gpt2_hidden_size": 512,
+    "n_layers": 6,
+    "n_heads": 8,
+    "max_len": 512,
+    "dt_dim": 16,
+    "pad_token_id": 0
+  },
+
+  "decode": {
+    "num_class": 2,
+    "cls": "cls",
+    "dropout": 0.2
+  },
+
+  "data_config": {
+    "folder": "data/yl/raw",
+    "val_folder": "data/yl/raw",
+    "batch_size": 12,
+    "max_txn_len": 32,
+    "minleng": 1,
+    "hiswindow": 512
+  },
+
+  "loss_fn": {
+    "name": "sft_focal_loss_with_amount",
+    "params": {
+      "alpha": 0.25,
+      "gamma": 2.0,
+      "amount_clip": 4.0,
+      "pos_only": true
+    }
+  },
+
+  "step_scheduler": {
+    "max_steps": 5000,
+    "grad_accum_steps": 4,
+    "val_every_steps": 200,
+    "ckpt_every_steps": 500,
+    "warmup_steps": 200,
+    "init_lr": 0.0001,
+    "min_lr": 0.0000006,
+    "weight_decay": 0.01,
+    "betas": [0.9, 0.999],
+    "use_amp": true,
+    "log_every_steps": 20,
+    "keep_last_ckpts": 5
+  },
+
+  "paths": {
+    "save_ckpt": "models/routec",
+    "logging_path": "log/routec",
+    "tokenizer_state": "data/yl/yl_tokenizer.json"
+  }
+}
