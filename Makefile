@@ -74,7 +74,16 @@ test:
 DOCKER_REG   ?= local
 DOCKER_TAG   ?= latest
 NGC_TAG      ?= 24.10-py3
-DOCKER_FLAGS ?= --progress=plain
+# 默认禁用 BuildKit：服务器 daemon 状态异常时（libnetwork socket 缺失、
+# runc prestart hook 失败、size validation 错等），BuildKit 子容器会卡死。
+# legacy builder 直接跑 RUN，不依赖 libnetwork socket，鲁棒性更高。
+# 想用 BuildKit 加速时显式覆盖：make docker-build DOCKER_BUILDKIT=1
+DOCKER_BUILDKIT ?= 0
+DOCKER_FLAGS ?=
+ifeq ($(DOCKER_BUILDKIT),1)
+	DOCKER_FLAGS := --progress=plain
+endif
+export DOCKER_BUILDKIT
 
 # 1. 基础镜像（CPU 路线用，gpu 镜像 FROM NGC 不依赖它）
 docker-build-base:

@@ -202,8 +202,23 @@ docker images | grep '^local/tm-'
 
 #### 故障回退：禁用 BuildKit
 
-如果是 BuildKit/libnetwork 相关错误（`dial unix /var/run/docker/<hash>.sock`
-或 `failed size validation: N != M`），切到 classic builder 即可绕开：
+如果 `make docker-build-*` 在第一步直接报：
+```
+runc run failed: ... dial unix /var/run/docker/<hash>.sock: connect: no such file or directory
+error running prestart hook #0: exit status 1
+```
+这是 **Docker daemon 的 libnetwork 子系统异常**（不是 Dockerfile 问题）。
+根因：Docker daemon 启动时应在 `/var/run/docker/libnetwork/` 下创建
+`<hash>.sock`，但因 kernel 升级、`daemon.json` 改成 `"iptables": false`、
+AppArmor/SELinux 拦截、或 containerd 状态污染等，socket 没创建出来。
+BuildKit 的每条 `RUN` 都会起一个 runc 子容器去走 libnetwork → 必崩。
+
+Makefile 默认已经把 `DOCKER_BUILDKIT=0`，所以 `make docker-build-*` 会自动
+切到 **legacy builder**——它不依赖 libnetwork socket，直接在 build 容器内跑
+`RUN`，所以你大概率不必做任何额外操作。
+
+如果 `make docker-build-*` 仍报错（说明有人 export 了 `DOCKER_BUILDKIT=1`
+or CI 设置了），手动跑：
 
 ```bash
 DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.base -t local/tm-base:latest .
@@ -215,13 +230,34 @@ DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.gpu \
     -t local/tm-gpu:latest .
 ```
 
-> `Dockerfile.base` 仍用 `--mount=type=cache` 加速；classic builder 会忽略该
-> 子句（不报错，只是不缓存）。`Dockerfile.gpu` 与 `Dockerfile.cpu` 都未用
-> cache mount，classic builder 完全兼容。
+`Dockerfile.gpu` / `Dockerfile.cpu` 没用 `--mount=type=cache`，classic builder
+完全兼容。`Dockerfile.base` 用了 cache mount，classic builder 会忽略该子句
+（不报错，只是不缓存）。
+
+如果切到 classic builder **仍**报错（意味 daemon 已经彻底崩了）：
+```bash
+# 1. 看日志找根因
+sudo journalctl -u docker --no-pager -n 80 | grep -E 'libnetwork|docker-init|failed'
+# 2. 看 socket 在不在
+sudo ls -la /var/run/docker/libnetwork/ 2>&1
+# 3. 重启 daemon（会拉起 libnetwork 子系统）
+sudo systemctl restart containerd docker
+sleep 3
+# 4. 验证 daemon 自身健康
+docker run --rm hello-world
+# 5. 如果 hello-world 也报同样的 libnetwork 错，进阶排查：
+#    - /etc/docker/daemon.json 是否设 "iptables": false / "bridge": "none"
+#    - 用 nftables 的系统是否需要 modprobe iptable_nat
+#    - 强删 containerd 状态：sudo rm -rf /var/lib/containerd/io.containerd.*  后重启
+```
+
+> BuildKit 模式（`DOCKER_BUILDKIT=1`）有 pip/apt cache 跨 build 复用的加速，
+> 但代价是依赖 daemon 健康。在本仓库中 3 个 image 的 build 都是分钟级，cache
+> 节省的时间不够抵消 daemon 飘起来的修复成本，所以默认禁用。想启用加速：
 >
-> 若仍报 `failed size validation`，先 `docker system prune -af` 清掉损坏的
-> containerd 元数据，再 `docker pull nvcr.io/nvidia/pytorch:24.10-py3` 强制
-> 重写镜像 manifest，然后重 build。
+> ```bash
+> make docker-build DOCKER_BUILDKIT=1
+> ```
 
 #### 镜像构建后怎么用
 
