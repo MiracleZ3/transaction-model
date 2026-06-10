@@ -172,9 +172,10 @@ def build_datasets(
             collate_fn=prepare_collate(pad, dc.get("hiswindow", 512)),
             num_workers=0,
         )
-        # 给 trainer 用：set_epoch 需要在每个 epoch 调用
-        loader.sampler = sampler
-        loader.is_distributed = is_dist
+        # 注意：loader.sampler / loader.is_distributed 这两个属性不要再后赋！
+        # DataLoader 在 2.x 的 __setattr__ 会拒绝 sampler（已在构造器绑定），
+        # 自定义属性也可能被拦。sampler 已通过 sampler=sampler 传进 DataLoader；
+        # 仓库代码不会再读这两属性（trainer 直接 iterate loader）。
         return loader
 
     train_loader = build_loader(train_folder, "train", is_train=True)
