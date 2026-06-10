@@ -560,7 +560,7 @@ print(f"Vocab size: {tokenizer.get_vocab_size()}")
 | Step 3 模型训练 | ❌ | ✅ **必需 CUDA** | NeMo AutoModel + FSDP2 |
 | Step 4 嵌入提取 | ❌ | ✅ **必需 cuDF + CUDA** | 复用 Step 2 的 tokenizer + GPU 模型推理 |
 | Step 5 欺诈检测 | ✅ | ✅ 自动 | XGBoost 自动检测 cuda |
-| Step 6 Route C 微调 | ✅（demo 可 `--device cpu`） | ✅ 建议 | `python scripts/step_06_finetune_routec.py`；DeepSpeed/FSDP 未启用（见 upgrade/ylformer.md §C7） |
+| Step 6 Route C 微调 | ✅（demo 可 `--device cpu`） | ✅ 建议 | `python scripts/step_06_finetune_routec.py`；trainer 走 torch 原生 DDP（无 DeepSpeed/FSDP） |
 
 ## Route C 速查
 
