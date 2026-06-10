@@ -364,7 +364,9 @@ class TokenizerPipeline:
         )
 
         work = df_meta[group_cols].copy()
-        work["_txn_text"] = txn_text.values if hasattr(txn_text, "values") else txn_text
+        # 直接赋 cuDF Series（按 index 对齐），不能取 .values：
+        # cuDF 字符串列 dtype 为 object，cupy 不支持，.values 会 TypeError。
+        work["_txn_text"] = txn_text
         # 还有可能来自 group_cols 自身的 NaN → drop，不让它污染分组
         work = work.dropna(subset=["_txn_text"])
 
