@@ -6,19 +6,107 @@ Financial transaction foundation model for fraud detection.
 
 ## 架构概览
 
+仓库现在并存两条数据路线。底座是同一套 **Decoder-Only Llama 预训练**，
+两条路线在数据入口与下游任务上分叉。
+
+### 路线 0（基线）：TabFormer CSV → 嵌入 → XGBoost
+
+原始 IBM TabFormer 信用卡交易数据，进 13 维原始特征 + 512d 嵌入
+（PCA → 64d），用 XGBoost 三模型对比 ("原始特征" / "嵌入" / "两者拼接")：
+
 ```
-原始交易数据 ──► 时间分割 ──► 领域分词器 ──► 语料库
-                                              │
-                    Decoder-Only Transformer (~29M)
-                    (Llama 架构: RoPE + GQA + SwiGLU)
-                                              │
-              原始特征(13d)              嵌入向量(512d→64d PCA)
-                  │                           │
-                  └───── XGBoost 三模型对比 ─────┘
+原始 CSV ──► 时间分割 ──► FinancialTokenizer ──► 语料库
+                                    │
+                       Decoder-Only Transformer (~29M, 12 tokens/txn)
+                       (Llama 架构: RoPE + GQA + SwiGLU)
+                                    │
+                原始特征(13d)        嵌入向量(512d→64d PCA)
+                    │                         │
+                    └──── XGBoost 三模型对比 ──────┘
                     Baseline    Embedding    Combined
 ```
 
-**核心创新**: 金融领域专用分词器 (Financial Tokenizer)，每笔交易仅 12 tokens（GPT-2 BPE 需 30-50+），在 4096 上下文窗口内可容纳约 315 笔交易。
+**核心创新**：金融领域分词器 (FinancialTokenizer)，每笔交易仅 12 tokens
+（GPT-2 BPE 需 30-50+），在 4096 上下文窗口内可容纳约 315 笔交易。
+
+### 路线 A：银联 NDJSON → 复用底座 CLM → 嵌入 → XGBoost
+
+银联 `risk_control_2` 风格的 NDJSON（每行一个用户的
+`{"cert_sm3", "trans": [[...20+字段...]], "label"}`）走**最小侵入式数据适配器**，
+不改底座，只替换分词器与数据入口：
+
+```
+银联 NDJSON ──► ndjson_loader ──► 行级 parquet (cups_*)
+                    │
+                    ▼
+              YLTokenizerPipeline (重 fit, ~16-17 tokens/txn)
+                    │
+                    ▼
+                 4096 语料 ──► Llama CLM (NeMo FSDP2 预训)
+                                    │ last-token pool
+                                    ▼
+                              512d 嵌入 ─── PCA ──► 64d
+                                    │
+                                  (用户级 label 广播到每笔)
+                                    ▼
+                      XGBoost 三模型 (Baseline / Embedding / Combined)
+```
+
+- **预训练** 与路线 0 完全相同（NeMo AutoModel + FSDP2），仅 `--variant yl`
+  切换 tokenizer/vocab。
+- **下游** 是用户级二分类（"是否风险客户"），复用 Step 4/5 抽嵌入 → XGBoost。
+- **代价**：放弃端到端分类头与业务损失（金额加权 focal / pAUC 等）——
+  这部分由路线 C 补回。
+- 入口：`step_01b_load_ndjson.py` → `step_02_tokenize_ndjson.py` →
+  `step_03_train_model.py --variant yl` →
+  `step_04_extract_embeddings.py --dataset-config dataset_yl` →
+  `step_05_fraud_detection.py --dataset-config dataset_yl`
+
+### 路线 C：Llama (Route A ckpt) + GPT2 + 分类头 + 业务损失（端到端微调）
+
+在 Route A 预训 ckpt 基础上，新增独立微调分支。保留多个 risk_control_2 风格
+的业务损失：
+
+```
+input_ids [B, T, L]    T=hiswindow 用户序列维, L=单笔交易内部 token (~16-17)
+    │ reshape [B*T, L]
+    ▼
+Llama decoder (~29M, route A 预训 ckpt, 冻结 + LoRA r=8 α=32)   per_txn_enc [B,T,512]
+    │ + learned position embedding [T,512] + FrequencyEncode(delta_time) [B,T,16]
+    ▼ Linear(528 → 512)
+GPT2 (cross-txn sequence encoder, 6 layer, 全训)   gpt2_enc [B,T,512]
+    │ ClassifierHead (末位 token / mean pool)
+    ▼
+logits [B, 2] ──► focal_with_amount (默认) / pAUC_sigmoid /
+                  focal_weight / cross_entropy
+```
+
+- **方案锁定**：Llama 512d 与 GPT2 输入直接对齐（route A 的 consolidated
+  ckpt 直接复用，避免重训）；只对 Llama 的 `q_proj/v_proj` 注 LoRA。
+- **4 个业务损失**：金额加权 focal（默认）/ partial-AUC pairwise sigmoid /
+  focal 加权（无金额）/ 交叉熵基线。
+- **训练骨干**：torch 原生 DDP（无 DeepSpeed/FSDP 依赖）。
+- **与路线 A 互补**：Route A 出 512d 嵌入喂 XGBoost；Route C 端到端出二分类 +
+  每用户概率 `val_prob.json`。两者解耦，可平行对比。
+- 包：`transaction_model/finetune/`（config / factory / trainer / losses / models / data）；
+  配置 `configs/routec/default.json`；
+  入口 `python scripts/step_06_finetune_routec.py`。
+  完整操作见 [`How_To_Use.md`](How_To_Use.md) §13。
+
+### 两条路线的关系
+
+| 维度 | 路线 A | 路线 C |
+|------|--------|--------|
+| 数据 | NDJSON → parquet 行级 | 同上 |
+| Llama 训练方式 | **预训练**（CLM, NeMo FSDP2） | **微调**（冻结 + LoRA，复用路线 A ckpt） |
+| 下游 | 嵌入 → PCA → XGBoost | 端到端二分类头 |
+| 业务损失 | 无 | focal_with_amount / pAUC sigmoid / focal_weight / cross |
+| 输出 | embeddings.npy + AUC | `ckpt_step*.pt` + 每用户概率 `val_prob.json` |
+| 何时用 | 想要可解释嵌入、迁移到其它下游 | 想要业务目标的端到端优化 |
+| 入口 step | 01b/02/03/04/05 | 06 |
+
+两条路线共享同一个 Llama 预训 ckpt（Step 03 产出）。
+
 
 ## 项目结构
 
@@ -222,12 +310,8 @@ or CI 设置了），手动跑：
 
 ```bash
 DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.base -t local/tm-base:latest .
-DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.cpu \
-    --build-arg REGISTRY=local --build-arg TAG=latest \
-    -t local/tm-cpu:latest .
-DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.gpu \
-    --build-arg NGC_TAG=24.10-py3 \
-    -t local/tm-gpu:latest .
+DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.cpu --build-arg REGISTRY=local --build-arg TAG=latest -t local/tm-cpu:latest .
+DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.gpu --build-arg NGC_TAG=24.10-py3 -t local/tm-gpu:latest .
 ```
 
 `Dockerfile.gpu` / `Dockerfile.cpu` 没用 `--mount=type=cache`，classic builder
