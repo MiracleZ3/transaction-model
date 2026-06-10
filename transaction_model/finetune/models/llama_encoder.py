@@ -20,6 +20,34 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 
+# peft >=0.4 把若干 LoRA kwarg 加了 lora_ 前缀，>=0.10 直接拒绝旧名。
+# 用户 JSON / 旧文档 / 老代码里仍可能用旧名（短、易读）。这里把所有旧名
+# 统一翻译到当前 peft 接受的名字。已用新名（lora_alpha / lora_dropout...）
+# 的写法不动。增删条目时同步更新这张表即可。
+_LORA_KWARG_ALIASES: dict[str, str] = {
+    "alpha": "lora_alpha",
+    "dropout": "lora_dropout",
+    # 兼容性保留：这些是 peft 历史上更边角的别名，目前未使用，但万一用用户的
+    # 旧 config 里冒出来也兜住——
+    "scaling": "lora_scaling",
+}
+
+
+def _normalize_lora_kwargs(cfg: dict) -> dict:
+    """把 lora_cfg 里的旧 kwarg 名翻译到当前 peft LoraConfig 接受的名字。
+
+    规则：若存在旧名 alias，且新名未出现，则把旧名挪到新名；若新旧名都在
+    （用户混用），保留新名（更明确的写法优先）。
+    """
+    out = dict(cfg)
+    for old, new in _LORA_KWARG_ALIASES.items():
+        if old in out and new not in out:
+            out[new] = out.pop(old)
+        elif old in out and new in out:
+            out.pop(old)   # 新名已显式给出，丢弃旧名
+    return out
+
+
 class LlamaEncoder(nn.Module):
     """Per-transaction Llama encoder.
 
@@ -123,10 +151,11 @@ class LlamaEncoder(nn.Module):
             "target_modules": ["q_proj", "v_proj"],
             **lora_cfg,
         }
-        # 兼容老/新 peft：alpha 在 peft>=0.4 已改名 lora_alpha，>0.10 直接拒绝。
-        # 用户 YAML/JSON 里写 "alpha" 更易读，这里统一翻译，两个版本都能吃。
-        if "alpha" in cfg:
-            cfg.setdefault("lora_alpha", cfg.pop("alpha"))
+        # 兼容老/新 peft 的 kwarg 改名。peft >=0.4 把 alpha→lora_alpha、
+        # dropout→lora_dropout；>=0.10 直接拒绝旧名（TypeError。
+        # 你这次连报了 alpha / dropout 两次 → 不能一行行 patch，统一翻译。
+        # 用户 YAML/JSON 里继续写 "alpha" / "dropout" 更易读，这里一次性归一化。
+        cfg = _normalize_lora_kwargs(cfg)
         logger.info(f"Injecting LoRA into Llama: {cfg}")
         # 关键：LlamaModel 不是 ForCausalLM，所以 can't use TaskType.SEQ_CLS
         # target_modules 直接打到 LlamaModel 的 attn 上即可
@@ -134,7 +163,7 @@ class LlamaEncoder(nn.Module):
             self.llama = get_peft_model(self.llama, LoraConfig(**cfg))
             self.lora_applied = True
         except Exception as e:
-            # 失败回退：尝试 all-linear（cfg 已是翻译后的形态，直接复用）
+            # 失败回退：尝试 all-linear（cfg 已归一化，直接复用）
             logger.warning(
                 f"LoRA injection with target_modules={cfg.get('target_modules')} "
                 f"failed: {e}. Falling back to all-linear."
