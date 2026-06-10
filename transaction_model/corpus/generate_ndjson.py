@@ -205,13 +205,12 @@ def _to_corpus_lines_with_meta(
         grouped = grouped
 
     # 同时取每组的 label（用户级）
+    # label 是用户级标签广播到每笔交易，组内应一致。原代码用 lambda 取 iloc[0]，
+    # 但 cuDF 的 groupby.agg 不支持 Python callable（会把它当聚合名解析 → TypeError）。
+    # 改用 cuDF/pandas 都原生支持的 "first"（语义等价：组内首元素）。
     label_series = None
     if YL_LABEL_KEY in work.columns:
-        # group_keys[:-1] = group_cols（去掉 _chunk_id）
-        label_grp = (
-            work.groupby(group_cols)[YL_LABEL_KEY]
-            .agg(lambda s: s.iloc[0] if hasattr(s, "iloc") else list(s)[0])
-        )
+        label_grp = work.groupby(group_cols)[YL_LABEL_KEY].agg("first")
         if hasattr(label_grp, "to_pandas"):
             label_grp = label_grp.to_pandas()
         label_series = label_grp
