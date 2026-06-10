@@ -297,6 +297,36 @@ def _extract_labels(gdf, prefer_col: str | None = None) -> np.ndarray | None:
     return None
 
 
+def _find_consolidated_model(ckpt_dir: Path) -> Path | None:
+    """在 checkpoint 目录中查找含 config.json 的 HuggingFace 兼容模型目录。
+
+    NeMo AutoModel FSDP2 保存 consolidated 模型时，典型结构为：
+        ckpt_dir/consolidated/config.json + model.safetensors
+    或
+        ckpt_dir/<model_repo_id>/config.json + model.safetensors
+
+    也可能是直接在 ckpt_dir 根目录下有 config.json。
+    """
+    # 1. 直接在 ckpt_dir 下
+    if (ckpt_dir / "config.json").exists():
+        return ckpt_dir
+
+    # 2. 查找子目录（如 consolidated/ 或 model_repo_id/）
+    for child in sorted(ckpt_dir.iterdir()):
+        if child.is_dir() and (child / "config.json").exists():
+            return child
+
+    # 3. 递归查找（最多 2 层）
+    for child in ckpt_dir.rglob("config.json"):
+        parent = child.parent
+        # 确保目录下有权重文件
+        if any(parent.glob("*.safetensors")) or any(parent.glob("pytorch_model*")):
+            return parent
+        return parent  # 有 config.json 但暂无权重也返回
+
+    return None
+
+
 def extract_all_embeddings(
     config_name: str = "xgboost",
     training_config_name: str = "training",
@@ -349,12 +379,29 @@ def extract_all_embeddings(
     embed_dir = resolve_path(inf_cfg["embed_dir"])
     embed_dir.mkdir(parents=True, exist_ok=True)
 
+    # 如果 pretrained_model 目录不存在，回退到 checkpoint 目录
     if not model_dir.exists():
-        raise FileNotFoundError(
-            f"Decoder model directory not found: {model_dir}. "
-            f"Place a HF compatible checkpoint there or update "
-            f"configs/{training_config_name}.yaml paths.pretrained_model."
+        ckpt_dir = resolve_path(
+            train_cfg.get("checkpoint", {}).get("checkpoint_dir", "")
         )
+        if ckpt_dir.exists():
+            # 查找 consolidated 模型目录（含 config.json 的子目录）
+            model_dir = _find_consolidated_model(ckpt_dir)
+            if model_dir is not None:
+                print(f"  pretrained_model not found, using checkpoint: {model_dir}")
+            else:
+                raise FileNotFoundError(
+                    f"Decoder model directory not found: {resolve_path(train_cfg['paths']['pretrained_model'])}. "
+                    f"Checkpoint dir {ckpt_dir} exists but no consolidated model found. "
+                    f"Place a HF compatible checkpoint there or update "
+                    f"configs/{training_config_name}.yaml paths.pretrained_model."
+                )
+        else:
+            raise FileNotFoundError(
+                f"Decoder model directory not found: {resolve_path(train_cfg['paths']['pretrained_model'])}. "
+                f"Place a HF compatible checkpoint there or update "
+                f"configs/{training_config_name}.yaml paths.pretrained_model."
+            )
     if not (model_dir / "config.json").exists():
         raise FileNotFoundError(
             f"HuggingFace config.json not found inside {model_dir}. "

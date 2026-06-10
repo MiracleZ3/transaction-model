@@ -16,9 +16,7 @@ LABEL org.opencontainers.image.source="https://github.com/MiracleZ3/transaction-
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # 系统依赖：build-essential 给 C 扩展，ca-certificates / git / tzdata
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
         git \
@@ -40,8 +38,7 @@ WORKDIR /workspace
 COPY pyproject.toml requirements.txt ./
 
 # 2) 安装 CPU 依赖（base 只装 dev 不装 gpu/nemo；扩展镜像按需追加）
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip setuptools wheel && \
+RUN pip install --upgrade pip setuptools wheel && \
     pip install -e ".[dev]"
 
 # 3) 创建非 root 用户 (uid=1000，与大多数 Linux 宿主用户对齐)

@@ -8,6 +8,17 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 
+def _ensure_pandas(df):
+    """将 cuDF DataFrame 转换为 pandas DataFrame（如果必要）
+
+    sklearn 等库不支持 cuDF 的隐式 numpy 转换，
+    需要显式调用 .to_pandas() 后才能使用。
+    """
+    if hasattr(df, "to_pandas"):
+        return df.to_pandas()
+    return df
+
+
 def create_balanced_sample(
     df,
     feature_cols: list[str],
@@ -29,6 +40,7 @@ def create_balanced_sample(
     Returns:
         (X, y, sampled_idx) 特征矩阵、标签数组和索引
     """
+    df = _ensure_pandas(df)
     np.random.seed(random_state)
     fraud_idx = df.index[df[target_col] == 1].tolist()
     normal_idx = df.index[df[target_col] == 0].tolist()
@@ -66,6 +78,7 @@ def stratified_subsample(
     Returns:
         (X, y) 特征矩阵和标签数组
     """
+    df = _ensure_pandas(df)
     if n_samples >= len(df):
         X_sub = df[feature_cols]
         y_sub = df[target_col]
@@ -132,6 +145,8 @@ def save_eval_subsets(
         random_state: 随机种子
     """
     split_dir = Path(temporal_split_dir)
+    val_df = _ensure_pandas(val_df)
+    test_df = _ensure_pandas(test_df)
 
     for split_name, df in [("val", val_df), ("test", test_df)]:
         _, X_sub, _, y_sub = train_test_split(

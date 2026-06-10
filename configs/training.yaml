@@ -28,7 +28,7 @@ model:
 
 # -- Training Dataset -----------------------------------------------------
 dataset:
-  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  _target_: transaction_model.training.clm_data.build_financial_clm_dataset
   data_path: null
   merchant_hash_size: 2000
   seq_length: 4096
@@ -39,7 +39,7 @@ dataloader:
 
 # -- Validation Dataset ----------------------------------------------------
 validation_dataset:
-  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  _target_: transaction_model.training.clm_data.build_financial_clm_dataset
   data_path: null
   merchant_hash_size: 2000
   seq_length: 4096

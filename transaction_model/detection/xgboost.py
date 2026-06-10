@@ -53,17 +53,15 @@ def train_xgb_model(
         print("  Early stopping: disabled")
 
     t0 = time.time()
-    clf = xgb.XGBClassifier(
-        **params,
-        device=device,
-    )
+    clf_params = {**params, "device": device}
+    if early_stopping_rounds is not None:
+        clf_params["early_stopping_rounds"] = early_stopping_rounds
+        clf_params["eval_metric"] = eval_metric
+    clf = xgb.XGBClassifier(**clf_params)
     fit_kwargs: dict = {
         "eval_set": [(X_val, y_val)],
         "verbose": False,
     }
-    if early_stopping_rounds is not None:
-        fit_kwargs["early_stopping_rounds"] = early_stopping_rounds
-        fit_kwargs["eval_metric"] = eval_metric
     clf.fit(X_train, y_train, **fit_kwargs)
     train_time = time.time() - t0
 
@@ -73,7 +71,8 @@ def train_xgb_model(
     test_preds = clf.predict_proba(X_test)[:, 1]
     test_metrics = compute_metrics(y_test, test_preds)
 
-    best_iter = clf.best_iteration if clf.best_iteration is not None else "n/a"
+    # xgboost >=2.0 在未开 early stopping 时访问 best_iteration 会抛 AttributeError
+    best_iter = clf.best_iteration if early_stopping_rounds is not None else "n/a"
     print(f"  Train time: {train_time:.1f}s (best_iteration={best_iter})")
     print(f"  Val  ROC-AUC: {val_metrics['auc']:.4f} | AP: {val_metrics['ap']:.4f}")
     print(f"  Test ROC-AUC: {test_metrics['auc']:.4f} | AP: {test_metrics['ap']:.4f}")

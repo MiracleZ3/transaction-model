@@ -31,7 +31,7 @@ model:
 # -- Training Dataset (YL) -------------------------------------------------
 # tokenizer_variant + tokenizer_state_path 透传给 build_financial_clm_dataset
 dataset:
-  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  _target_: transaction_model.training.clm_data.build_financial_clm_dataset
   data_path: null
   merchant_hash_size: 4000              # 仅 tabformer 用；yl 下被忽略
   seq_length: 4096
@@ -44,7 +44,7 @@ dataloader:
 
 # -- Validation Dataset (YL) -----------------------------------------------
 validation_dataset:
-  _target_: transaction_model.training.clm_data:build_financial_clm_dataset
+  _target_: transaction_model.training.clm_data.build_financial_clm_dataset
   data_path: null
   merchant_hash_size: 4000
   seq_length: 4096
