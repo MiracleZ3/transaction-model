@@ -252,16 +252,33 @@ class FinancialTokenizerPipeline(TokenizerPipeline):
         df["mcc_int"] = mcc
         df["mcc_str"] = mcc.astype(str)
 
+        # year/month/day 入参可能是 int 或 float（parquet round-trip / cuDF 类型提升后
+        # 偶尔变 float64），astype(str) 会得到 "3.0" 这类串 → strptime 失败，cuDF
+        # 还会因「多种格式」直接 NotImplementedError。先强制转 int，确保拿到干净的
+        # "3" / "12"。time 列允许 NaN，用 00:00 兜底。
+        year_i = df["year"].fillna(0).astype("int64")
+        month_i = df["month"].fillna(1).astype("int64").clip(1, 12)
+        day_i = df["day"].fillna(1).astype("int64").clip(1, 31)
+        time_s = df["time"].fillna("00:00").astype(str)
+
         date_str = (
-            df["year"].astype(str) + "-"
-            + df["month"].astype(str).str.zfill(2) + "-"
-            + df["day"].astype(str).str.zfill(2) + " "
-            + df["time"].fillna("00:00").astype(str)
+            year_i.astype(str) + "-"
+            + month_i.astype(str).str.zfill(2) + "-"
+            + day_i.astype(str).str.zfill(2) + " "
+            + time_s
         )
-        dt = cudf.to_datetime(date_str, format="%Y-%m-%d %H:%M")
-        df["hour"] = dt.dt.hour
-        df["dow"] = dt.dt.dayofweek
-        df["month"] = dt.dt.month
+        # cuDF strptime 对异常日期（2/30、非标准时分）会直接抛 NotImplementedError；
+        # 先按标准格式解析，失败再退回 pandas（errors='coerce' 把坏行变 NaT）。
+        try:
+            dt = cudf.to_datetime(date_str, format="%Y-%m-%d %H:%M")
+        except (NotImplementedError, ValueError):
+            import pandas as _pd
+            col = date_str.to_pandas() if hasattr(date_str, "to_pandas") else date_str
+            dt = _pd.to_datetime(col, format="%Y-%m-%d %H:%M", errors="coerce")
+        # 坏日期（NaT）下 dt.hour 返回 NaN，fill 不让下游 FixedVocab 报错
+        df["hour"] = dt.dt.hour.fillna(0).astype("int32")
+        df["dow"] = dt.dt.dayofweek.fillna(0).astype("int32")
+        df["month"] = dt.dt.month.fillna(1).astype("int32")
 
         df["card"] = df["card"].astype(int).clip(0, 9)
         df["chip_upper"] = df["use_chip"].astype(str).str.upper()
