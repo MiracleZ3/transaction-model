@@ -89,11 +89,14 @@ class TimeDeltaTokenizer(BaseTokenizer):
         clamped = column_data.clip(0, self.max_horizon)
         # 统一拉回 host float64 计算 log/digitize（cupy 和 numpy 路径都走 host 控件，
         # 小算量上 host 更稳；避免 pandas 列没 cupy 转换路径、cuDF 24.x .values trap）。
+        # ⚠️ 关键：不能 np.asarray(cupy_array)！cupy 会通过 __array__ 直接抛
+        # "Implicit conversion to a NumPy array is not allowed"。必须走 .get() /
+        # cp.asnumpy() / .to_numpy() 显式拷出。
         if hasattr(clamped, "to_pandas"):
             host_arr = clamped.to_pandas().to_numpy(dtype="float64")
         else:
-            host_arr = np.asarray(clamped, dtype="float64")
-        boundaries = np.asarray(self.boundaries)
+            host_arr = _to_cpu_numpy(clamped, dtype="float64")
+        boundaries = _to_cpu_numpy(self.boundaries)   # self.boundaries 是 cupy 数组
         log_vals = np.log(host_arr + 1.0)
         token_ids = np.clip(
             np.digitize(log_vals, boundaries), 0, self.num_bins - 1
@@ -110,6 +113,32 @@ def _host_index(idx) -> "pd.Index":
     if hasattr(idx, "to_pandas"):
         return idx.to_pandas()
     return pd.Index(idx)
+
+
+def _to_cpu_numpy(x, dtype=None) -> "np.ndarray":
+    """把任意 array-like（cupy / numba DeviceNDArray / cuML wrapper / numpy / list
+    / pandas Series）统一拉回 host numpy ndarray。
+
+    为什么不用 np.asarray(x)：cupy.ndarray 的 __array__ 会 raise
+    'Implicit conversion to a NumPy array is not allowed. Please use .get() ...'。
+    """
+    # 1) cupy / 自带 .get 的设备容器（numba DeviceNDArray 也暴露 .copy_to_host）
+    try:
+        if hasattr(x, "get"):
+            x = x.get()
+        elif hasattr(x, "copy_to_host"):
+            x = x.copy_to_host()
+    except Exception:
+        pass
+    # 2) cuDF / pandas Series / Index
+    if hasattr(x, "to_pandas"):
+        try:
+            x = x.to_pandas().to_numpy(dtype=dtype) if dtype else x.to_pandas().to_numpy()
+            return x
+        except Exception:
+            return _to_cpu_numpy(x.to_pandas(), dtype=dtype)
+    # 3) 普通 numpy / list / scalar
+    return np.array(x, dtype=dtype) if dtype else np.asarray(x)
 
     def __repr__(self) -> str:
         status = "built" if self._vocab_built else "not built"
