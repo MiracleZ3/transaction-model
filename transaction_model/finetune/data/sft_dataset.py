@@ -134,7 +134,12 @@ def encode_one_txn_via_pipeline(
         if col not in token_df.columns:
             ids.append(unk)
             continue
-        val = token_df[col].iloc[0]
+        # cuDF Series.iloc[0] 在 24.x 偶尔返 cupy scalar，str() 会成 "<cupy int>"；
+        # 先 to_pandas() 拿 host scalar 再 str() 保证 vocab 命中。
+        col_s = token_df[col]
+        if hasattr(col_s, "to_pandas"):
+            col_s = col_s.to_pandas()
+        val = col_s.iloc[0]
         val_str = str(val)
         ids.append(vocab.get(val_str, unk))
     ids.append(eos_token_id)

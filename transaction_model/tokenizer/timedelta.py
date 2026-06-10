@@ -32,6 +32,9 @@ try:
     import cupy as cp
 except ImportError:  # pragma: no cover - cuPy optional on CPU
     cp = None  # type: ignore
+import numpy as np
+
+import pandas as pd
 
 from .base import BaseTokenizer
 
@@ -84,12 +87,29 @@ class TimeDeltaTokenizer(BaseTokenizer):
 
     def _tokenize_internal(self, column_data) -> cudf.Series:
         clamped = column_data.clip(0, self.max_horizon)
-        clamped_f64 = clamped.values.astype(cp.float64)
-        log_vals = cp.log(clamped_f64 + 1.0)
-        token_ids = cp.clip(
-            cp.digitize(log_vals, self.boundaries), 0, self.num_bins - 1
-        )
-        return cudf.Series(token_ids, index=column_data.index).map(self._idx_to_token)
+        # 统一拉回 host float64 计算 log/digitize（cupy 和 numpy 路径都走 host 控件，
+        # 小算量上 host 更稳；避免 pandas 列没 cupy 转换路径、cuDF 24.x .values trap）。
+        if hasattr(clamped, "to_pandas"):
+            host_arr = clamped.to_pandas().to_numpy(dtype="float64")
+        else:
+            host_arr = np.asarray(clamped, dtype="float64")
+        boundaries = np.asarray(self.boundaries)
+        log_vals = np.log(host_arr + 1.0)
+        token_ids = np.clip(
+            np.digitize(log_vals, boundaries), 0, self.num_bins - 1
+        ).astype("int64")
+        # 包装回 cuDF Series 并映射 token 字符串（cupy/numpy 步骤已统一）
+        ids_series = pd.Series(token_ids, index=_host_index(column_data.index))
+        _from_pandas = getattr(cudf.Series, "from_pandas", None)
+        cu_ids = _from_pandas(ids_series) if _from_pandas else cudf.Series(ids_series)
+        return cu_ids.map(self._idx_to_token)
+
+
+def _host_index(idx) -> "pd.Index":
+    """统一把 cuDF / pandas / RangeIndex 摘到 host pandas Index。"""
+    if hasattr(idx, "to_pandas"):
+        return idx.to_pandas()
+    return pd.Index(idx)
 
     def __repr__(self) -> str:
         status = "built" if self._vocab_built else "not built"

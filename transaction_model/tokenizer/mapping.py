@@ -38,6 +38,7 @@ try:
 except ImportError:  # pragma: no cover
     cp = None  # type: ignore
 import numpy as np
+import pandas as pd
 
 from .base import BaseTokenizer
 
@@ -142,18 +143,28 @@ class MappingTokenizer(BaseTokenizer):
         else:
             mapped = host.fillna(self.default)
         result = self.prefix + "_" + mapped.astype(str)
-        return cudf.Series(result.values, index=column_data.index)
+        # 不能把 object-dtype ndarray 直接喂 cudf.Series 构造器（cuDF 24.x 对 object
+        # 走慢路径甚至报 cupy does not support object）。result 已是 pandas.Series，
+        # 走 from_pandas（老 cuDF）或构造器（新 cuDF）。
+        _from_pandas = getattr(cudf.Series, "from_pandas", None)
+        return _from_pandas(result) if _from_pandas else cudf.Series(result)
 
     def _tokenize_range(self, column_data) -> cudf.Series:
         """Map integer values via range lookup (vectorized with numpy)."""
-        vals = column_data.values.get() if hasattr(column_data.values, 'get') else column_data.values
-        vals = np.asarray(vals, dtype=np.int64)
+        # cuDF 数值列 .values 走 cupy；老 cuDF 的 .values 可能不是 cupy。
+        # 统一 to_pandas().to_numpy(dtype=int64)，跨版本稳健。
+        if hasattr(column_data, "to_pandas"):
+            vals = column_data.to_pandas().to_numpy(dtype=np.int64)
+        else:
+            vals = np.asarray(column_data, dtype=np.int64)
 
         result = np.full(len(vals), f"{self.prefix}_{self.default}", dtype=object)
         for lo, hi, label in self._range_lookup:
             mask = (vals >= lo) & (vals <= hi)
             result[mask] = f"{self.prefix}_{label}"
-        return cudf.Series(result, index=column_data.index)
+        _from_pandas = getattr(cudf.Series, "from_pandas", None)
+        idx = column_data.to_pandas().index if hasattr(column_data, "to_pandas") else column_data.index
+        return _from_pandas(pd.Series(result, index=idx)) if _from_pandas else cudf.Series(result, index=column_data.index)
 
     def __repr__(self) -> str:
         status = "built" if self._vocab_built else "not built"

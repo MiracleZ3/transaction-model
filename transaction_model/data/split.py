@@ -25,13 +25,20 @@ def add_date_column(gdf):
     day_str = gdf['Day'].astype(str).str.zfill(2)
     date_str = year_str + '-' + month_str + '-' + day_str
 
-    # 优先使用 cuDF，回退 pandas
+    # cuDF to_datetime（带 format=）对异常日期（越界 year、空串、NaN）非常严格，
+    # 会抛 NotImplementedError / OverflowError / KeyError / ValueError；统一兜底到
+    # pandas（errors='coerce' 把坏行变 NaT，下游按时间分割自然落到最早段）。
     try:
         import cudf
-        gdf['date'] = cudf.to_datetime(date_str, format='%Y-%m-%d')
+        try:
+            gdf['date'] = cudf.to_datetime(date_str, format='%Y-%m-%d')
+        except Exception:
+            import pandas as _pd
+            col = date_str.to_pandas() if hasattr(date_str, 'to_pandas') else date_str
+            gdf['date'] = _pd.to_datetime(col, format='%Y-%m-%d', errors='coerce')
     except ImportError:
         import pandas as pd
-        gdf['date'] = pd.to_datetime(date_str, format='%Y-%m-%d')
+        gdf['date'] = pd.to_datetime(date_str, format='%Y-%m-%d', errors='coerce')
 
     return gdf
 

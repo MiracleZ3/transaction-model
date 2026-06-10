@@ -146,17 +146,31 @@ class YLTabularTokenizer:
         """保存 vocab 与 pipeline 配置到 JSON。"""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # config 里 amount_thresholds 在 amount_strategy='quantile' 时为 None，
+        # 在 'fixed' 模式下可能传进 np.array / np.float64；统一 JSON 化（递归压平），
+        # 否则 json.dump 会 TypeError: Object of type ndarray/float64 is not JSON serializable。
+        def _jsonable(v):
+            import numpy as _np
+            if isinstance(v, _np.ndarray):
+                return [_jsonable(x) for x in v.tolist()]
+            if isinstance(v, _np.generic):
+                return v.item()
+            if isinstance(v, (list, tuple)):
+                return [_jsonable(x) for x in v]
+            return v
+
+        cfg = {
+            "merchant_hash_size": self._pipeline.merchant_hash_size,
+            "merch_name_hash_size": self._pipeline.merch_name_hash_size,
+            "amount_strategy": self._pipeline.amount_strategy,
+            "amount_bins": self._pipeline.amount_bins,
+            "amount_thresholds": _jsonable(self._pipeline.amount_thresholds),
+            "include_time_delta": self._pipeline.include_time_delta,
+            "time_delta_bins": self._pipeline.time_delta_bins,
+        }
         # 反转 vocab 用 int key（JSON 要求 str key 用 str(int) 序列化）
         state = {
-            "config": {
-                "merchant_hash_size": self._pipeline.merchant_hash_size,
-                "merch_name_hash_size": self._pipeline.merch_name_hash_size,
-                "amount_strategy": self._pipeline.amount_strategy,
-                "amount_bins": self._pipeline.amount_bins,
-                "amount_thresholds": self._pipeline.amount_thresholds,
-                "include_time_delta": self._pipeline.include_time_delta,
-                "time_delta_bins": self._pipeline.time_delta_bins,
-            },
+            "config": cfg,
             "vocab": self.vocab,
             "id_to_token": {str(k): v for k, v in self.id_to_token.items()},
             "pipeline_state": self._get_pipeline_state(),

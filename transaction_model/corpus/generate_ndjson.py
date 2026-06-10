@@ -185,14 +185,25 @@ def _to_corpus_lines_with_meta(
     label 取该分组内 label 的众数（用户级标签广播到行后应一致）。
     """
     token_cols = list(token_df.columns)
+    # 与 pipeline.to_corpus_lines 相同的 NaN 防护：任一 step 出 NaN，cuDF/pandas 的
+    # .str.cat 会把整行 txn_text 变 NaN，下游 _fmt 的 join 报 type/None。先逐列填 <unk>。
+    token_df = token_df.copy()
+    for c in token_cols:
+        if token_df[c].isna().any():
+            token_df[c] = token_df[c].fillna("<unk>")
     txn_text = token_df[token_cols[0]].str.cat(
         [token_df[c] for c in token_cols[1:]], sep=" "
     )
 
     work = df_meta[group_cols].copy()
+    # 直接赋 Series（cuDF 按 index 对齐），不走 .values（cuDF 24.x string 列会
+    # TypeError: cupy does not support object）。若 label 是 cuDF 列也对齐赋值。
     work["_txn_text"] = txn_text
     if YL_LABEL_KEY in df_meta.columns:
-        work[YL_LABEL_KEY] = df_meta[YL_LABEL_KEY].values
+        lbl_col = df_meta[YL_LABEL_KEY]
+        if hasattr(lbl_col, "to_pandas"):
+            lbl_col = lbl_col.to_pandas()
+        work[YL_LABEL_KEY] = lbl_col.to_numpy() if hasattr(lbl_col, "to_numpy") else lbl_col
 
     work["_seq_id"] = work.groupby(group_cols).cumcount()
     work["_chunk_id"] = (work["_seq_id"] // chunk_size).astype("int32")

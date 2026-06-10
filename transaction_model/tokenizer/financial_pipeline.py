@@ -269,9 +269,14 @@ class FinancialTokenizerPipeline(TokenizerPipeline):
         )
         # cuDF strptime 对异常日期（2/30、非标准时分）会直接抛 NotImplementedError；
         # 先按标准格式解析，失败再退回 pandas（errors='coerce' 把坏行变 NaT）。
+        # year clip 防 year=0/未来年份（cuDF 24.x 在 year<1900 会 OverflowError 逃出
+        # 原本窄异常）。先把非法年份合到 1970，既不毁 strptime 也不毁下游 RoPE 位置编码。
+        year_i = year_i.clip(lower=1970)
         try:
             dt = cudf.to_datetime(date_str, format="%Y-%m-%d %H:%M")
-        except (NotImplementedError, ValueError):
+        except Exception:
+            # cuDF 对混合格式 / 越界 / 编码异常会抛 NotImplementedError / OverflowError /
+            # KeyError / ValueError 等多种类型，统一回退 pandas（errors='coerce' 把坏行变 NaT）
             import pandas as _pd
             col = date_str.to_pandas() if hasattr(date_str, "to_pandas") else date_str
             dt = _pd.to_datetime(col, format="%Y-%m-%d %H:%M", errors="coerce")

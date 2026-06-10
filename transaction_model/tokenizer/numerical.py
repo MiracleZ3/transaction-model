@@ -114,20 +114,23 @@ class NumericalTokenizerOptBin(BaseTokenizer):
         }
 
     def _get_fitted_state(self) -> dict:
-        # cuML KBinsDiscretizer 本身不能 JSON 化；但 transform 只依赖 bin_edges_ 和
-        # n_bins。把它们存成 list，from_file 时重建 builder 状态即可。
+        # cuML KBinsDiscretizer 本身不能 JSON 化；transform 只依赖 bin_edges_ 和 n_bins。
+        # bin_edges_ 形态随 cuML/sklearn 版本而变（List[ndarray] / 2D ndarray / cupy /
+        # numba DeviceNDArray），统一递归拉回 host + float 化，保证 json.dump 不崩。
         edges = None
+        n_per_feat: list[int] | None = None
         if self._vocab_built and getattr(self.builder, "bin_edges_", None) is not None:
             be = self.builder.bin_edges_
-            # cuML 返回 numpy/cupy/DeviceNDArray；统一拉回 host list
+            edges = _to_jsonable_floats(be)
+            # 顺带记录每条特征的 bin 数（edges[i] 有 k+1 个点 → k 个 bin）
             try:
-                import numpy as _np
-                edges = _np.asarray(be).tolist()
+                n_per_feat = [len(row) - 1 for row in edges]  # type: ignore[arg-type]
             except Exception:
-                edges = [list(c) for c in be]
+                n_per_feat = None
         return {
             "bin_edges": edges,
-            "n_bins": getattr(self.builder, "n_bins", self.num_bins),
+            "n_per_feat": n_per_feat,
+            "n_bins": int(getattr(self.builder, "n_bins", self.num_bins)),
             "strategy": self.strategy,
             "_vocab_built": self._vocab_built,
         }
@@ -135,18 +138,81 @@ class NumericalTokenizerOptBin(BaseTokenizer):
     def _set_fitted_state(self, state: dict) -> None:
         # 缺 bin_edges（旧 state 兼容）：仅标记 vocab built，但 builder 仍未 fit，
         # amount 列 transform 仍会 NotFittedError。新 state 走完整重建。
-        if state.get("bin_edges") is not None:
-            import numpy as _np
-            edges = _np.array(state["bin_edges"], dtype="float64")
+        import numpy as _np
+        edges_raw = state.get("bin_edges")
+        if edges_raw is not None:
+            # 还原成 List[ndarray]（sklearn/cuML 都接受的 bin_edges_ 形态）
+            rows = [_np.asarray(r, dtype="float64") for r in edges_raw]
             try:
-                # cuML KBinsDiscretizer 接受直接赋 bin_edges_ + n_bins
-                self.builder.bin_edges_ = edges
-                if hasattr(self.builder, "n_bins_"):
-                    self.builder.n_bins_ = _np.array([len(c) - 1 for c in edges])
-                else:
-                    self.builder.n_bins = state.get("n_bins", self.num_bins)
+                self.builder.bin_edges_ = (
+                    _np.array(rows, dtype=object) if len(rows) > 1 else rows[0]
+                )
             except Exception:
-                # 某些 cuML 版本 bin_edges_ 是只读，flag fitted 不足以让 transform 正确；
-                # 这种情况下后续 transform 会露馅（数值错），但至少不崩在赋值上。
+                # 只读属性 / 形状不匹配：直接 list 赋，transform 路径用容器访问也能跑
+                try:
+                    self.builder.bin_edges_ = rows
+                except Exception:
+                    pass
+            # n_bins_：每特征实际 bin 数（n_per_feat 优先；否则按 edges 推算）
+            n_per_feat = state.get("n_per_feat")
+            try:
+                if n_per_feat is not None:
+                    self.builder.n_bins_ = _np.asarray(n_per_feat, dtype="int64")
+                elif hasattr(self.builder, "n_bins_"):
+                    self.builder.n_bins_ = _np.array(
+                        [len(r) - 1 for r in rows], dtype="int64"
+                    )
+            except Exception:
                 pass
         self._vocab_built = state.get("_vocab_built", False)
+
+
+def _to_jsonable_floats(obj):
+    """递归把 numpy/cupy/numba 数组、标量、嵌套结构拉回纯 Python float/list。
+
+    cuML KBinsDiscretizer.bin_edges_ 跨版本形态不一（List[ndarray]、2D ndarray、
+    cupy.ndarray、numba DeviceNDArray），np.asarray(be).tolist() 有时会保留
+    np.float64 或 ndarray 元素，json.dump 会 TypeError: Object of type
+    ndarray/float64 is not JSON serializable。这里彻底压平。
+    """
+    import numpy as _np
+    # 优先按"类数组"统一摘出
+    try:
+        if hasattr(obj, "get"):           # cupy / numba DeviceNDArray
+            obj = obj.get()
+    except Exception:
+        pass
+    try:
+        arr = _np.asarray(obj)
+    except Exception:
+        arr = obj
+    if isinstance(arr, _np.ndarray):
+        # ndarray.tolist() 已把标量数组压成 python float；多错保险再处理
+        flat = arr.tolist()
+        return _coerce_python(flat)
+    if isinstance(arr, (list, tuple)):
+        return _coerce_python(arr)
+    if isinstance(arr, (int,)):
+        return arr
+    try:
+        return float(arr)
+    except (TypeError, ValueError):
+        return arr
+
+
+def _coerce_python(seq):
+    out = []
+    for item in seq:
+        if isinstance(item, (list, tuple)):
+            out.append(_coerce_python(item))
+        elif hasattr(item, "tolist"):
+            out.append(_coerce_python(item.tolist()))
+        elif isinstance(item, (int,)):
+            out.append(item)
+        else:
+            try:
+                out.append(float(item))
+            except (TypeError, ValueError):
+                # 元组/其它：递归尽力 coerce
+                out.append(item)
+    return out
