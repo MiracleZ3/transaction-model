@@ -382,35 +382,37 @@ def extract_all_embeddings(
     embed_dir = resolve_path(inf_cfg["embed_dir"])
     embed_dir.mkdir(parents=True, exist_ok=True)
 
-    # 如果 pretrained_model 目录不存在，回退到 checkpoint 目录
-    if not model_dir.exists():
+    # model_path 接 NeMo 训练产物时通常是 models/decoder-yl/，但真正的 HF 目录
+    # （config.json + *.safetensors）在 checkpoints/consolidated/safetensors/。
+    # 用共享 helper 自动定位，省去手工 mv/symlink 的步骤。
+    from transaction_model.checkpoints import resolve_hf_model_dir
+
+    direct_cfg = resolve_path(train_cfg['paths']['pretrained_model'])
+    try:
+        hf_dir = resolve_hf_model_dir(direct_cfg)
+        if hf_dir != direct_cfg:
+            print(f"  pretrained_model {direct_cfg} 不是 HF 目录，自动定位到 {hf_dir}")
+        model_dir = hf_dir
+    except FileNotFoundError:
+        # 旧逻辑兼容：直接根目录不存在时，去 checkpoint_dir 下找
         ckpt_dir = resolve_path(
             train_cfg.get("checkpoint", {}).get("checkpoint_dir", "")
         )
         if ckpt_dir.exists():
-            # 查找 consolidated 模型目录（含 config.json 的子目录）
-            model_dir = _find_consolidated_model(ckpt_dir)
-            if model_dir is not None:
-                print(f"  pretrained_model not found, using checkpoint: {model_dir}")
-            else:
+            try:
+                hf_dir = resolve_hf_model_dir(ckpt_dir)
+                print(f"  pretrained_model not found, using checkpoint: {hf_dir}")
+                model_dir = hf_dir
+            except FileNotFoundError:
                 raise FileNotFoundError(
-                    f"Decoder model directory not found: {resolve_path(train_cfg['paths']['pretrained_model'])}. "
-                    f"Checkpoint dir {ckpt_dir} exists but no consolidated model found. "
-                    f"Place a HF compatible checkpoint there or update "
-                    f"configs/{training_config_name}.yaml paths.pretrained_model."
+                    f"No HF model dir under {direct_cfg} or {ckpt_dir}. "
+                    f"Run step_03 with save_consolidated=true (default in training_yl.yaml) "
+                    f"or point paths.pretrained_model at the consolidated/safetensors/ dir."
                 )
         else:
-            raise FileNotFoundError(
-                f"Decoder model directory not found: {resolve_path(train_cfg['paths']['pretrained_model'])}. "
-                f"Place a HF compatible checkpoint there or update "
-                f"configs/{training_config_name}.yaml paths.pretrained_model."
-            )
-    if not (model_dir / "config.json").exists():
-        raise FileNotFoundError(
-            f"HuggingFace config.json not found inside {model_dir}. "
-            f"Expected a model directory containing config.json + "
-            f"safetensors/pytorch_model weights."
-        )
+            raise
+
+    print(f"  Using HF decoder model: {model_dir}")
 
     if tokenizer_variant == "yl":
         # YL: 输入是展开后的 parquet（含 cups_* / cert_sm3 / label）

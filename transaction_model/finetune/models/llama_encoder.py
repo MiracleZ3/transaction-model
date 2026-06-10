@@ -66,6 +66,18 @@ class LlamaEncoder(nn.Module):
         self.pad_token_id = pad_token_id
 
         if model_path is not None:
+            from transaction_model.checkpoints import resolve_hf_model_dir
+            try:
+                hf_dir = resolve_hf_model_dir(model_path)
+                if hf_dir != Path(model_path):
+                    logger.info(
+                        f"model_path {model_path} 不是 HF 目录，自动定位到 {hf_dir}"
+                    )
+                model_path = hf_dir
+            except FileNotFoundError as e:
+                # 让 transformers 的 from_pretrained 报更清晰的错——但leep the 消息。
+                logger.error(str(e))
+                raise
             logger.info(f"Loading Llama from {model_path}")
             self.llama = LlamaModel.from_pretrained(str(model_path))
             # 校验维度
