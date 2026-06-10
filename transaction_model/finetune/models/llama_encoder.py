@@ -123,6 +123,10 @@ class LlamaEncoder(nn.Module):
             "target_modules": ["q_proj", "v_proj"],
             **lora_cfg,
         }
+        # 兼容老/新 peft：alpha 在 peft>=0.4 已改名 lora_alpha，>0.10 直接拒绝。
+        # 用户 YAML/JSON 里写 "alpha" 更易读，这里统一翻译，两个版本都能吃。
+        if "alpha" in cfg:
+            cfg.setdefault("lora_alpha", cfg.pop("alpha"))
         logger.info(f"Injecting LoRA into Llama: {cfg}")
         # 关键：LlamaModel 不是 ForCausalLM，所以 can't use TaskType.SEQ_CLS
         # target_modules 直接打到 LlamaModel 的 attn 上即可
@@ -130,9 +134,9 @@ class LlamaEncoder(nn.Module):
             self.llama = get_peft_model(self.llama, LoraConfig(**cfg))
             self.lora_applied = True
         except Exception as e:
-            # 失败回退：尝试 all-linear
+            # 失败回退：尝试 all-linear（cfg 已是翻译后的形态，直接复用）
             logger.warning(
-                f"LoRA injection with target_modules={cfg['target_modules']} "
+                f"LoRA injection with target_modules={cfg.get('target_modules')} "
                 f"failed: {e}. Falling back to all-linear."
             )
             cfg["target_modules"] = "all-linear"
