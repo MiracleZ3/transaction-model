@@ -118,11 +118,16 @@ class NumericalTokenizerOptBin(BaseTokenizer):
             self._jit_fit(vals)
         bin_edges = _normalize_bin_edges(self.builder.bin_edges_)
         # 单特征 KBinsDiscretizer（这是我们的情况——只 tokenize 一个数值列）：
-        edges_for_this = bin_edges[0]
+        # 强制 float64：经过 _normalize_bin_edges 后可能仍是 dtype=object（如
+        # cuML 把 bin_edges_ 存成 np.array(rows, dtype=object) 时每个 cell 是
+        # ndarray，asarray 后保持 object），np.digitize 会 TypeError: Cannot
+        # cast array data from dtype('O') to dtype('float64') according to
+        # the rule 'safe'。
+        edges_for_this = _np.asarray(bin_edges[0], dtype="float64")
         # NaN → 落到桶 0；按 sklearn 规则 digitize(vals+eps, edges[1:]) 然后 clip。
         eps = 1e-8
         masked = _np.where(_np.isnan(vals), -_np.inf, vals)
-        ids = _np.digitize(masked + eps, edges_for_this[1:])
+        ids = _np.digitize(masked + eps, edges_for_this[1:].astype("float64"))
         ids = _np.clip(ids, 0, self.num_bins - 1).astype("int32")
         # NaN 的样本：digitize(-inf) 会落到桶 0；显式补 0 防异常
         ids[_np.isnan(vals)] = 0
@@ -166,23 +171,39 @@ class NumericalTokenizerOptBin(BaseTokenizer):
 
 
 def _normalize_bin_edges(bin_edges_) -> list:
-    """把 cuML / sklearn 的 KBinsDiscretizer.bin_edges_ 归一化成 List[ndarray]。
+    """把 cuML / sklearn 的 KBinsDiscretizer.bin_edges_ 归一化成 List[ndarray]，
+    且每个 ndarray 强制为 float64。
+
+    为什么强制 float64：cuML 单特征会把 bin_edges_ 存成
+    ``np.array([np.array([...])], dtype=object)``，``_np.asarray(c)`` 后仍是
+    object dtype；下游 ``np.digitize`` 看见 dtype=object 会 TypeError: Cannot
+    cast array data from dtype('O') to dtype('float64') according to the rule
+    'safe'。
 
     sklearn 标准形态：``List[ndarray]``（每特征一个 1D 边界数组）；
     cuML 单特征下偶发返回 flat 1D ndarray，``bin_edges[jj][1:]`` 直接 IndexError。
-    这里返回 ``list of np.ndarray``，让下游索引统一。
+    本函数返回 ``list of float64 ndarray``，让下游索引统一且类型安全。
     """
     import numpy as _np
+
+    def _to_f64(c):
+        # 第 1 列是数值数组就转 float64；含 numpy/object 元素递归展平
+        if isinstance(c, _np.ndarray) and c.dtype == object:
+            c = _np.concatenate([_np.asarray(x, dtype="float64").ravel() for x in c])
+        return _np.asarray(c, dtype="float64")
+
     if isinstance(bin_edges_, (list, tuple)):
-        return [_np.asarray(c) for c in bin_edges_]
+        return [_to_f64(c) for c in bin_edges_]
     arr = _np.asarray(bin_edges_)
+    if arr.dtype == object:
+        # cell 是 ndarray 的 object array → 每个 cell 一个特征
+        return [_to_f64(c) for c in arr]
+    arr = arr.astype("float64", copy=False)
     if arr.ndim == 1:
         # 单特征被拍平
         return [arr]
-    if arr.dtype == object:
-        return [c if isinstance(c, _np.ndarray) else _np.asarray(c) for c in arr]
     # 2D 纯数值：每行是一个特征的 edges
-    return [_np.asarray(row) for row in arr]
+    return [arr[i] for i in range(arr.shape[0])]
 
     def __repr__(self) -> str:
         status = "built" if self._vocab_built else "not built"
