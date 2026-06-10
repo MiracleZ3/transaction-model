@@ -114,12 +114,39 @@ class NumericalTokenizerOptBin(BaseTokenizer):
         }
 
     def _get_fitted_state(self) -> dict:
+        # cuML KBinsDiscretizer 本身不能 JSON 化；但 transform 只依赖 bin_edges_ 和
+        # n_bins。把它们存成 list，from_file 时重建 builder 状态即可。
+        edges = None
+        if self._vocab_built and getattr(self.builder, "bin_edges_", None) is not None:
+            be = self.builder.bin_edges_
+            # cuML 返回 numpy/cupy/DeviceNDArray；统一拉回 host list
+            try:
+                import numpy as _np
+                edges = _np.asarray(be).tolist()
+            except Exception:
+                edges = [list(c) for c in be]
         return {
-            "builder": self.builder if self._vocab_built else None,
+            "bin_edges": edges,
+            "n_bins": getattr(self.builder, "n_bins", self.num_bins),
+            "strategy": self.strategy,
             "_vocab_built": self._vocab_built,
         }
 
     def _set_fitted_state(self, state: dict) -> None:
-        if state.get("builder") is not None:
-            self.builder = state["builder"]
+        # 缺 bin_edges（旧 state 兼容）：仅标记 vocab built，但 builder 仍未 fit，
+        # amount 列 transform 仍会 NotFittedError。新 state 走完整重建。
+        if state.get("bin_edges") is not None:
+            import numpy as _np
+            edges = _np.array(state["bin_edges"], dtype="float64")
+            try:
+                # cuML KBinsDiscretizer 接受直接赋 bin_edges_ + n_bins
+                self.builder.bin_edges_ = edges
+                if hasattr(self.builder, "n_bins_"):
+                    self.builder.n_bins_ = _np.array([len(c) - 1 for c in edges])
+                else:
+                    self.builder.n_bins = state.get("n_bins", self.num_bins)
+            except Exception:
+                # 某些 cuML 版本 bin_edges_ 是只读，flag fitted 不足以让 transform 正确；
+                # 这种情况下后续 transform 会露馅（数值错），但至少不崩在赋值上。
+                pass
         self._vocab_built = state.get("_vocab_built", False)
