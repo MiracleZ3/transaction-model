@@ -352,12 +352,21 @@ class TokenizerPipeline:
             12 tokens/txn + separators).
         """
         token_cols = list(token_df.columns)
+        # 任一 step 的 tokenize 出 NaN（如 merchant 名空 / amount NaN / NaT 时间
+        # 越界）时，.str.cat 会把整行 txn_text 变 NaN，后续 _fmt 的 join 会
+        # TypeError: expected str, NoneType。先逐列填未知 token 再拼，保证非空串。
+        token_df = token_df.copy()
+        for c in token_cols:
+            if token_df[c].isna().any():
+                token_df[c] = token_df[c].fillna("<unk>")
         txn_text = token_df[token_cols[0]].str.cat(
             [token_df[c] for c in token_cols[1:]], sep=" "
         )
 
         work = df_meta[group_cols].copy()
-        work["_txn_text"] = txn_text
+        work["_txn_text"] = txn_text.values if hasattr(txn_text, "values") else txn_text
+        # 还有可能来自 group_cols 自身的 NaN → drop，不让它污染分组
+        work = work.dropna(subset=["_txn_text"])
 
         work["_seq_id"] = work.groupby(group_cols).cumcount()
         work["_chunk_id"] = (work["_seq_id"] // chunk_size).astype("int32")
@@ -367,6 +376,8 @@ class TokenizerPipeline:
             grouped = grouped.to_pandas()
 
         def _fmt(txn_list):
+            # 兜底：丢掉残留的 None/NaN（理论上已无）
+            txn_list = [t for t in txn_list if t is not None and t == t]
             return "<bos> " + " <sep> ".join(txn_list) + " <eos>"
 
         return grouped.map(_fmt).tolist()

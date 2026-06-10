@@ -73,7 +73,10 @@ class CategoricalHashTokenizer(BaseTokenizer):
         # cuDF 的 hash_values() 返回有符号 int64（可能为负），cuDF 的 % 遵循 C 语义
         # 可能产生负数 bucket，导致 _idx_to_token 取不到键 → 全塌成 <unk>。
         # 防御性写法：先 mod 再加回再 mod，无论 pandas/cuDF 都得非负索引。
-        token_bucket = column_data % self.vocab_limit
+        # NaN（如 merchant 名空 → hash_values 为 NaN）也要先填 0 再 mod，否则
+        # .map 会回 NaN、str.cat 把整行 txn_text 污染成 NaN。
+        col = column_data.fillna(0)
+        token_bucket = col % self.vocab_limit
         token_bucket = (token_bucket + self.vocab_limit) % self.vocab_limit
         return token_bucket.map(self._idx_to_token)
 

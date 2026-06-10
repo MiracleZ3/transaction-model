@@ -65,7 +65,9 @@ class FixedVocabTokenizer(BaseTokenizer):
 
     def tokenize(self, column_data) -> cudf.Series:
         """*column_data* must be an integer cudf.Series within [min_val, max_val]."""
-        int_vals = column_data.astype("int32").clip(self.min_val, self.max_val)
+        # NaN（如 NaT 时间 → hour NaN）先填 min_val，clip 也容不下 NaN。
+        col = column_data.fillna(self.min_val)
+        int_vals = col.astype("int32").clip(self.min_val, self.max_val)
         return int_vals.map(self._idx_to_token)
 
     def __repr__(self) -> str:

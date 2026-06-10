@@ -90,6 +90,10 @@ class NumericalTokenizerOptBin(BaseTokenizer):
             bins = self.builder.transform(column_data)
         if isinstance(bins, cudf.DataFrame):
             bins = bins.iloc[:, 0]
+        # 越界 / NaN 输入会让 transform 出 NaN bin → .map 回 NaN，污染下游
+        # .str.cat（整行变 NaN）→ _fmt 的 join 报 expected str。
+        # 缺省回桶 0。
+        bins = bins.fillna(0)
         return bins.astype("int32").map(self._idx_to_token)
 
     def __repr__(self) -> str:
