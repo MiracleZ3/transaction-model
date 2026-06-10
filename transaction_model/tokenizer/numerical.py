@@ -81,20 +81,84 @@ class NumericalTokenizerOptBin(BaseTokenizer):
         self._vocab_built = True
 
     def tokenize(self, column_data) -> cudf.Series:
-        if isinstance(column_data, cudf.Series):
-            column_data = cudf.DataFrame(column_data)
-        if self.stream:
-            with self.stream:
-                bins = self.builder.transform(column_data)
+        # 关键：不走 self.builder.transform！cuML KBinsDiscretizer 在单特征 / 数据稀疏
+        # 场景会把 bin_edges_ 拍平成 1D numpy（而非 List[ndarray]），transform 内部
+        # 索引 bin_edges[jj][1:] 时炸 IndexError（详见服务器 step_06 traceback）。
+        # 我们直接读 bin_edges_，自己 digitize——既避免该 bug，又能在 cupy/cuml/numpy
+        # 后端一致。
+        import numpy as _np
+
+        # 1. 拉到 host numpy 1D float64 列
+        if hasattr(column_data, "to_pandas"):
+            pdf = column_data.to_pandas()
+            try:
+                vals = pdf.to_numpy(dtype="float64")
+            except Exception:
+                vals = _np.asarray(pdf, dtype="float64")
+        elif hasattr(column_data, "values"):
+            v = column_data.values
+            try:
+                vals = _np.asarray(v.get() if hasattr(v, "get") else v, dtype="float64")
+            except Exception:
+                vals = _np.asarray(v, dtype="float64")
         else:
-            bins = self.builder.transform(column_data)
-        if isinstance(bins, cudf.DataFrame):
-            bins = bins.iloc[:, 0]
-        # 越界 / NaN 输入会让 transform 出 NaN bin → .map 回 NaN，污染下游
-        # .str.cat（整行变 NaN）→ _fmt 的 join 报 expected str。
-        # 缺省回桶 0。
-        bins = bins.fillna(0)
-        return bins.astype("int32").map(self._idx_to_token)
+            vals = _np.asarray(column_data, dtype="float64")
+        # cuDF to_frame → DataFrame 时 vals 可能是 2D (n,1)；统一展平成 1D
+        if vals.ndim == 2:
+            vals = vals.reshape(-1, vals.shape[-1])[:, 0]
+        elif vals.ndim == 0:
+            vals = vals.reshape(1)
+
+        # 2. 读 builder.bin_edges_，归一化成 List[ndarray]（避开 cuML flat 索引 bug）
+        bin_edges = _normalize_bin_edges(self.builder.bin_edges_)
+        # 单特征 KBinsDiscretizer（这是我们的情况——只 tokenize 一个数值列）：
+        # edges = bin_edges[0]，rxjs 风格 [1:] 对齐 sklearn transformer 的 off-by-one
+        edges_for_this = bin_edges[0]
+        # NaN → 落到桶 0；按 sklearn 规则 digitize(vals+eps, edges[1:]) 然后 clip。
+        eps = 1e-8
+        masked = _np.where(_np.isnan(vals), -_np.inf, vals)
+        ids = _np.digitize(masked + eps, edges_for_this[1:])
+        ids = _np.clip(ids, 0, self.num_bins - 1).astype("int32")
+        # NaN 的样本：digitize(-inf) 会落到桶 0；显式补 0 防异常
+        ids[_np.isnan(vals)] = 0
+
+        # 3. 映射到 token 字符串，包成 cudf Series 返回（保持原 index 对齐）
+        import pandas as _pd
+        if hasattr(column_data, "index"):
+            idx = column_data.index
+            if hasattr(idx, "to_pandas"):
+                idx = idx.to_pandas()
+        else:
+            idx = _pd.RangeIndex(len(ids))
+        token_strs = _pd.Series(
+            [self._idx_to_token.get(int(i), f"{self.special_token}_0") for i in ids],
+            index=idx,
+        )
+        if cudf is None:
+            # CPU-only 回退（如单测）：直接返 pandas Series
+            return token_strs
+        _from_pandas = getattr(cudf.Series, "from_pandas", None)
+        return _from_pandas(token_strs) if _from_pandas else cudf.Series(token_strs)
+
+
+def _normalize_bin_edges(bin_edges_) -> list:
+    """把 cuML / sklearn 的 KBinsDiscretizer.bin_edges_ 归一化成 List[ndarray]。
+
+    sklearn 标准形态：``List[ndarray]``（每特征一个 1D 边界数组）；
+    cuML 单特征下偶发返回 flat 1D ndarray，``bin_edges[jj][1:]`` 直接 IndexError。
+    这里返回 ``list of np.ndarray``，让下游索引统一。
+    """
+    import numpy as _np
+    if isinstance(bin_edges_, (list, tuple)):
+        return [_np.asarray(c) for c in bin_edges_]
+    arr = _np.asarray(bin_edges_)
+    if arr.ndim == 1:
+        # 单特征被拍平
+        return [arr]
+    if arr.dtype == object:
+        return [c if isinstance(c, _np.ndarray) else _np.asarray(c) for c in arr]
+    # 2D 纯数值：每行是一个特征的 edges
+    return [_np.asarray(row) for row in arr]
 
     def __repr__(self) -> str:
         status = "built" if self._vocab_built else "not built"
