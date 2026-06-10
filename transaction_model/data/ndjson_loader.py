@@ -150,7 +150,11 @@ def expand_records_to_dataframe(
         )
 
     if use_gpu and cudf is not None:
-        df = cudf.DataFrame.from_pandas(pd.DataFrame(rows))
+        # cuDF 24.x 起移除了 DataFrame.from_pandas，标准入口是构造器 cudf.DataFrame(pdf)。
+        # 老版本（<23）只有 from_pandas，这里两种都兜住。
+        pdf = pd.DataFrame(rows)
+        _from_pandas = getattr(cudf.DataFrame, "from_pandas", None)
+        df = _from_pandas(pdf) if _from_pandas else cudf.DataFrame(pdf)
     else:
         df = pd.DataFrame(rows)
 

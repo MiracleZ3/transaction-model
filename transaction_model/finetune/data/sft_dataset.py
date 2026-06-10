@@ -117,7 +117,10 @@ def encode_one_txn_via_pipeline(
     df = pd.DataFrame([row])
     if _have_cudf:
         try:
-            df = cudf.DataFrame.from_pandas(df)
+            # cuDF 24.x 移除了 DataFrame.from_pandas，改用构造器 cudf.DataFrame(pdf)；
+            # 老版本仍走 from_pandas。
+            _from_pandas = getattr(cudf.DataFrame, "from_pandas", None)
+            df = _from_pandas(df) if _from_pandas else cudf.DataFrame(df)
         except Exception:
             df = pd.DataFrame([row])
 
