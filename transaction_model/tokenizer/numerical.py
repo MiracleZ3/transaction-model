@@ -183,18 +183,32 @@ def _normalize_bin_edges(bin_edges_) -> list:
     sklearn 标准形态：``List[ndarray]``（每特征一个 1D 边界数组）；
     cuML 单特征下偶发返回 flat 1D ndarray，``bin_edges[jj][1:]`` 直接 IndexError。
     本函数返回 ``list of float64 ndarray``，让下游索引统一且类型安全。
+
+    注意 cupy / numba 设备元素：``np.asarray(cupy_array, dtype=...)`` 会触发
+    cupy 的 ``__array__`` 守卫抛 "Implicit conversion..."——必须先把 cell 显式
+    .get() 摘回 host。统一走 transaction_model._gpu_numpy.to_cpu_numpy。
     """
     import numpy as _np
+    from transaction_model._gpu_numpy import to_cpu_numpy
 
     def _to_f64(c):
-        # 第 1 列是数值数组就转 float64；含 numpy/object 元素递归展平
+        # cell 是 ndarray object 或 cupy / numba 时先 to_cpu_numpy 摘回 host
+        if hasattr(c, "__len__") and not isinstance(c, _np.ndarray):
+            try:
+                c = to_cpu_numpy(c, dtype="float64")
+            except Exception:
+                c = _np.asarray(c)
         if isinstance(c, _np.ndarray) and c.dtype == object:
-            c = _np.concatenate([_np.asarray(x, dtype="float64").ravel() for x in c])
-        return _np.asarray(c, dtype="float64")
+            # object-ndarray：每个 cell 递归展平（cell 也可能是 cupy / list）
+            c = _np.concatenate([to_cpu_numpy(x, dtype="float64").ravel() for x in c])
+        return to_cpu_numpy(c, dtype="float64") if not isinstance(c, _np.ndarray) or c.dtype != _np.float64 else c
 
     if isinstance(bin_edges_, (list, tuple)):
         return [_to_f64(c) for c in bin_edges_]
-    arr = _np.asarray(bin_edges_)
+    # 顶层也可能是 cupy（math edge ndarray 整个在 device 上）
+    if hasattr(bin_edges_, "get") or hasattr(bin_edges_, "copy_to_host"):
+        bin_edges_ = to_cpu_numpy(bin_edges_)
+    arr = bin_edges_ if isinstance(bin_edges_, _np.ndarray) else _np.asarray(bin_edges_)
     if arr.dtype == object:
         # cell 是 ndarray 的 object array → 每个 cell 一个特征
         return [_to_f64(c) for c in arr]

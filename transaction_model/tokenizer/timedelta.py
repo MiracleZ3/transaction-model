@@ -107,6 +107,13 @@ class TimeDeltaTokenizer(BaseTokenizer):
         cu_ids = _from_pandas(ids_series) if _from_pandas else cudf.Series(ids_series)
         return cu_ids.map(self._idx_to_token)
 
+    def __repr__(self) -> str:
+        status = "built" if self._vocab_built else "not built"
+        return (
+            f"TimeDeltaTokenizer(token={self.special_token}, "
+            f"bins={self.num_bins}, {status})"
+        )
+
 
 def _host_index(idx) -> "pd.Index":
     """统一把 cuDF / pandas / RangeIndex 摘到 host pandas Index。"""
@@ -116,36 +123,14 @@ def _host_index(idx) -> "pd.Index":
 
 
 def _to_cpu_numpy(x, dtype=None) -> "np.ndarray":
-    """把任意 array-like（cupy / numba DeviceNDArray / cuML wrapper / numpy / list
-    / pandas Series）统一拉回 host numpy ndarray。
+    """Deprecated alias kept for backward-compat. Delegates to
+    ``transaction_model._gpu_numpy.to_cpu_numpy``（单一真源）。
 
     为什么不用 np.asarray(x)：cupy.ndarray 的 __array__ 会 raise
     'Implicit conversion to a NumPy array is not allowed. Please use .get() ...'。
     """
-    # 1) cupy / 自带 .get 的设备容器（numba DeviceNDArray 也暴露 .copy_to_host）
-    try:
-        if hasattr(x, "get"):
-            x = x.get()
-        elif hasattr(x, "copy_to_host"):
-            x = x.copy_to_host()
-    except Exception:
-        pass
-    # 2) cuDF / pandas Series / Index
-    if hasattr(x, "to_pandas"):
-        try:
-            x = x.to_pandas().to_numpy(dtype=dtype) if dtype else x.to_pandas().to_numpy()
-            return x
-        except Exception:
-            return _to_cpu_numpy(x.to_pandas(), dtype=dtype)
-    # 3) 普通 numpy / list / scalar
-    return np.array(x, dtype=dtype) if dtype else np.asarray(x)
-
-    def __repr__(self) -> str:
-        status = "built" if self._vocab_built else "not built"
-        return (
-            f"TimeDeltaTokenizer(token={self.special_token}, "
-            f"bins={self.num_bins}, {status})"
-        )
+    from transaction_model._gpu_numpy import to_cpu_numpy
+    return to_cpu_numpy(x, dtype=dtype)
 
     # -- serialization -----------------------------------------------------
 
