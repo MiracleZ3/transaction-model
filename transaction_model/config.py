@@ -21,7 +21,7 @@ def load_config(name: str) -> dict[str, Any]:
     path = CONFIG_DIR / f"{name}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

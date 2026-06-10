@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tarfile
+import sys
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -37,7 +38,22 @@ def download_tabformer(
     if not csv_path.exists():
         print("Extracting transactions.tgz...")
         with tarfile.open(tgz_path, "r:gz") as tar:
-            tar.extractall(path=raw_dir, filter='data')
+            # filter='data'（防 Zip Slip / 路径穿越）只在 Python ≥3.12 支持；
+            # 旧版本（含部分 NGC 3.10 镜像）会因未知关键字报 TypeError。
+            if sys.version_info >= (3, 12):
+                tar.extractall(path=raw_dir, filter="data")
+            else:
+                tar.extractall(path=raw_dir)
+
+    # 解压后 csv 可能在 raw_dir 根目录，也可能在嵌套子目录，统一 glob 定位
+    if not csv_path.exists():
+        found = list(raw_dir.rglob("card_transaction.v1.csv"))
+        if found:
+            csv_path = found[0]
+        else:
+            raise FileNotFoundError(
+                f"Raw CSV not found under {raw_dir} after extract"
+            )
 
     print(f"Dataset ready: {csv_path}")
     return csv_path

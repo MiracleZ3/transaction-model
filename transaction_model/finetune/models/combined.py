@@ -53,8 +53,8 @@ class CombinedModel(nn.Module):
         per_txn = per_txn.to(dtype=mydtype)
         if delta_time is not None:
             delta_time = delta_time.to(dtype=mydtype)
-        if gpt2_attention_mask is not None:
-            gpt2_attention_mask = gpt2_attention_mask.to(dtype=mydtype)
+        # gpt2_attention_mask 保持原 dtype（bool/long）不转 float：
+        # GPT2Model 期望 bool/long mask，转成 float 会让 1.0 被当成"mask 掉"→ NaN
 
         # 2. GPT2 跨交易
         gpt2_enc = self.gpt2(per_txn, delta_time, gpt2_attention_mask)

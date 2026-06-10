@@ -138,7 +138,7 @@ def load_corpus_and_tokenize(
     print(f"Loading corpus from {data_path} (variant={tokenizer_variant})...")
 
     sequences = []
-    with open(data_path, "r") as f:
+    with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:

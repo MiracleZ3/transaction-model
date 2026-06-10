@@ -325,10 +325,12 @@ class YLPipeline(TokenizerPipeline):
                 sort_cols.append("seq_order")
             df = df.sort_values(sort_cols).reset_index(drop=True)
 
-            ts = df["unix_timestap"].astype("float64")
-            diff = df.groupby("cert_sm3")["unix_timestap"].astype("float64").diff()
+            # groupby().diff() 输出整数列（unix 时间戳是整数），diff 后再转 float64。
+            # 注意：cuDF 上 SeriesGroupBy 不支持 .astype（部分版本 AttributeError），
+            # 故先 diff 再转类型，pandas/cudf 两边都稳。
+            diff = df.groupby("cert_sm3")["unix_timestap"].diff()
             # cudf / pandas 都有 .diff()；不存在则用 fillna(0)。秒数。
-            td_seconds = (diff.fillna(0).clip(lower=0)).astype("float64")
+            td_seconds = diff.fillna(0).clip(lower=0).astype("float64")
             df["time_delta_s"] = td_seconds
 
         # 6. 为每个 hash step 预计算整数 hash 列

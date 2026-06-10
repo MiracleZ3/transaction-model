@@ -238,6 +238,7 @@ def build_trainer(
         weight_decay=ss.get("weight_decay", 0.01),
         betas=tuple(ss.get("betas", [0.9, 0.999])),
         use_amp=ss.get("use_amp", True),
+        amp_dtype=ss.get("amp_dtype", "bf16"),
         log_every_steps=ss.get("log_every_steps", 20),
         seed=ss.get("seed", 42),
         save_dir=paths.get("save_ckpt", "models/routec"),

@@ -33,7 +33,7 @@ tokenizer:
   amount_bins: 20                                        # 对齐旧 feature_config num_class=20
   include_time_delta: true                               # 补偿无 GPT2 频率编码
   time_delta_bins: 32
-  chunk_size: 315
+  chunk_size: 230                       # YL 每笔约 16-17 token（非 TabFormer 的 12），230×17≈3910 < seq_length 4096
   context_window: 4096
   state_path: "data/yl/yl_tokenizer.json"                # fit 后保存的 vocab state
 

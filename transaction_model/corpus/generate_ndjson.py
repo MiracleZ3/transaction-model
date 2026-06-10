@@ -74,7 +74,7 @@ def generate_corpus_from_ndjson(
     ndjson_path_or_dir = Path(ndjson_path_or_dir)
 
     if corpus_path.exists() and not force and tokenizer_state_path and Path(tokenizer_state_path).exists():
-        with open(corpus_path) as f:
+        with open(corpus_path, encoding="utf-8") as f:
             lines = [ln.strip() for ln in f if ln.strip()]
         tok = YLTabularTokenizer.from_file(tokenizer_state_path)
         print(f"[{split_name}] Corpus already exists: {len(lines):,} sequences")

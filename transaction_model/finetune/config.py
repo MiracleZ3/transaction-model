@@ -44,7 +44,7 @@ def load_config(path: str | Path) -> RouteCConfig:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Route C config not found: {path}")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = json.load(f)
 
     return RouteCConfig(

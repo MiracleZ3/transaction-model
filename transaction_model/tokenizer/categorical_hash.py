@@ -70,7 +70,11 @@ class CategoricalHashTokenizer(BaseTokenizer):
 
     def tokenize(self, column_data) -> cudf.Series:
         """*column_data* must already be integer hash values."""
+        # cuDF 的 hash_values() 返回有符号 int64（可能为负），cuDF 的 % 遵循 C 语义
+        # 可能产生负数 bucket，导致 _idx_to_token 取不到键 → 全塌成 <unk>。
+        # 防御性写法：先 mod 再加回再 mod，无论 pandas/cuDF 都得非负索引。
         token_bucket = column_data % self.vocab_limit
+        token_bucket = (token_bucket + self.vocab_limit) % self.vocab_limit
         return token_bucket.map(self._idx_to_token)
 
     def __repr__(self) -> str:

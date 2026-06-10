@@ -62,6 +62,7 @@ class TrainConfig:
     weight_decay: float = 0.01
     betas: tuple = (0.9, 0.999)
     use_amp: bool = True
+    amp_dtype: str = "bf16"   # bf16（A800/H100 推荐，无需 scaler） | fp16（需 GradScaler）
     log_every_steps: int = 20
     seed: int = 42
     save_dir: str = "models/routec"
@@ -129,12 +130,22 @@ class Trainer:
             weight_decay=cfg.weight_decay,
         )
         self.scheduler = self._build_scheduler(cfg)
-        # torch 2.x 推荐 torch.amp.GradScaler('cuda')；老式 torch.cuda.amp.GradScaler 兼容回退
+        # 混合精度：bf16 不需要 GradScaler（A800/H100 原生支持），fp16 才需要。
+        # 旧实现无条件建 scaler + autocast 默认 fp16，在 focal/pAUC loss 上易溢出 NaN。
         amp_enabled = cfg.use_amp and self.device.type == "cuda"
-        if hasattr(torch.amp, "GradScaler"):
-            self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-        else:  # pragma: no cover - very old torch
-            self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+        use_fp16 = amp_enabled and cfg.amp_dtype == "fp16"
+        self._amp_dtype = torch.float16 if use_fp16 else torch.bfloat16
+        if use_fp16:
+            if hasattr(torch.amp, "GradScaler"):
+                self.scaler = torch.amp.GradScaler("cuda", enabled=True)
+            else:  # pragma: no cover - very old torch
+                self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+        else:
+            # bf16 或未开 AMP：scer disabled，scale/update/unscale_ 均为 no-op
+            if hasattr(torch.amp, "GradScaler"):
+                self.scaler = torch.amp.GradScaler("cuda", enabled=False)
+            else:  # pragma: no cover
+                self.scaler = torch.cuda.amp.GradScaler(enabled=False)
 
         # DDP 包装：必须在 optimizer 构造之后做，否则会对未经 forward 的参数报错。
         # 调用方传 world_size>1 时才 wrap。
@@ -176,9 +187,12 @@ class Trainer:
         return self.model
 
     def _amp_ctx(self):
+        # autocast 是否启用跟 use_amp 绑定；dtype 用 self._amp_dtype（默认 bf16）。
+        # 不能用 scaler.is_enabled() 当开关：bf16 时 scaler disabled 但 autocast 仍要开。
+        enabled = self.cfg.use_amp and self.device.type == "cuda"
         if hasattr(torch.amp, "autocast"):
-            return torch.amp.autocast("cuda", enabled=self.scaler.is_enabled())
-        return torch.cuda.amp.autocast(enabled=self.scaler.is_enabled())
+            return torch.amp.autocast("cuda", dtype=self._amp_dtype, enabled=enabled)
+        return torch.cuda.amp.autocast(enabled=enabled)  # pragma: no cover
 
     def _build_scheduler(self, cfg: TrainConfig):
         from torch.optim.lr_scheduler import LambdaLR
@@ -366,10 +380,10 @@ class Trainer:
             }
             for i, u in enumerate(global_users)
         }
-        with open(prob_path, "w") as f:
-            json.dump(prob_records, f, indent=2)
-        with open(self._log_dir / f"{self.global_step}_val.json", "w") as f:
-            json.dump(metrics, f, indent=2)
+        with open(prob_path, "w", encoding="utf-8") as f:
+            json.dump(prob_records, f, indent=2, ensure_ascii=False)
+        with open(self._log_dir / f"{self.global_step}_val.json", "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, ensure_ascii=False)
 
         barrier()
         self.model.train()
@@ -467,7 +481,7 @@ class Trainer:
         if not is_main_process():
             return
         path = self._log_dir / f"{prefix}_stats.jsonl"
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             for i in range(max(0, len(stats["loss"]) - 1), len(stats["loss"])):
                 f.write(json.dumps({
                     "step": self.global_step - len(stats["loss"]) + i + 1,

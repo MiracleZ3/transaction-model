@@ -42,10 +42,10 @@ def generate_corpus(
     parquet_path = Path(parquet_path)
 
     if corpus_path.exists() and not force:
-        with open(corpus_path) as f:
+        with open(corpus_path, encoding="utf-8") as f:
             n_lines = sum(1 for _ in f)
         print(f"[{split_name}] Corpus already exists: {n_lines:,} sequences")
-        with open(corpus_path) as f:
+        with open(corpus_path, encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
 
     print(f"\n{'='*60}")
@@ -84,7 +84,7 @@ def generate_corpus(
     )
 
     corpus_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(corpus_path, "w") as f:
+    with open(corpus_path, "w", encoding="utf-8") as f:
         for line in corpus_lines:
             f.write(line + "\n")
 

@@ -235,7 +235,10 @@ def _extract_split_embeddings_yl(
         row_ids = gdf_proc["__row_id__"].to_pandas().to_numpy(dtype=np.int64)
     else:
         row_ids = gdf_proc["__row_id__"].to_numpy(dtype=np.int64)
-    if labels is not None and len(labels) > len(row_ids):
+    # pipeline.preprocess 会按 [user, time] 重排（yl_pipeline.py:326），
+    # embeddings 输出是排序后顺序，labels 必须同步重排（与 TabFormer 分支 line ~121 一致）。
+    # 旧实现用 > 判断在 subsample 后恒为 False（等长），导致标签不重排、特征-标签错位。
+    if labels is not None and len(row_ids) > 0:
         labels = labels[row_ids]
 
     token_df = pipeline.transform(gdf_proc)
@@ -468,7 +471,7 @@ def extract_all_embeddings(
         "n_test": split_sizes.get("test", 0),
         "row_id_alignment": "explicit_split_row_ids",
     }
-    with open(embed_dir / "metadata.json", "w") as f:
+    with open(embed_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
     print(f"\nAll embeddings saved to {embed_dir}")

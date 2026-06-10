@@ -173,10 +173,16 @@ def gather_predictions(
     labels_gathered = _gather(labels_p)
     amounts_gathered = _gather(amounts_p)
 
+    # Step 3: 字符串列表用 all_gather_object 同步（集体通信，所有 rank 都必须参与，
+    # 不能在它之前 early return，否则 rank0 会永远等不到其它 rank → NCCL 卡死）
+    users_per_rank = [None] * world_size
+    dist.all_gather_object(users_per_rank, users)
+
+    # 非 to_rank 在所有集体通信都完成后才返回
     if rank != to_rank:
         return None, None, [], None
 
-    # Step 3: rank 0 trim 回各 rank 的真实 n。users 是 list-of-str，需手动同步
+    # Step 4: rank 0 trim 回各 rank 的真实 n
     out_logits, out_labels, out_amounts = [], [], []
     for i in range(world_size):
         n = n_list[i]
@@ -184,15 +190,10 @@ def gather_predictions(
         out_labels.append(labels_gathered[i][:n])
         out_amounts.append(amounts_gathered[i][:n])
 
-    # Step 4: 字符串列表用 all_gather_object 同步
-    users_per_rank = [None] * world_size
-    dist.all_gather_object(users_per_rank, users)
-    out_users = users_per_rank if rank == to_rank else []
     flat_users: List[str] = []
-    if rank == to_rank:
-        # 各 rank 的 users 顺序与 logits_gathered 一一对应
-        for i in range(world_size):
-            flat_users.extend(users_per_rank[i])
+    # 各 rank 的 users 顺序与 logits_gathered 一一对应
+    for i in range(world_size):
+        flat_users.extend(users_per_rank[i])
 
     return (
         torch.cat(out_logits, dim=0),
