@@ -237,14 +237,13 @@ class YLTabularTokenizer:
             if it is not None:
                 tok._idx_to_token = {int(k): v for k, v in it.items()}
                 tok._vocab_built = True
-            # 恢复 bin_edges_ 等 fitted_state（NumericalTokenizerOptBin 重建 builder）
+            # 恢复 bin_edges_ 等 fitted_state（NumericalTokenizerOptBin 重建 builder）。
+            # 注意：以前是个 try/except Exception 静默吞——让"state 文件残缺"的故障
+            # 一直藏到 transform 时才报更含糊的错。现在不再吞，但允许 fitted 缺失
+            # （None / {}）跳过——那是合法的"step 没 fitted_state"。
             fitted = ser.get("fitted_state")
             if fitted:
-                try:
-                    tok._set_fitted_state(fitted)
-                except Exception as _e:
-                    # 不让单个 step 恢复失败阻塞加载；该 step transform 时会再报错
-                    print(f"  [warn] step {tok_id!r} _set_fitted_state failed: {_e}")
+                tok._set_fitted_state(fitted)   # 失败直接 raise，别藏到 tokenize 时再爆
 
     # ------------------------------------------------------------------
     # Encode / Decode（drop-in 与 FinancialTabularTokenizer 一致）

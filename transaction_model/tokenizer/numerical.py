@@ -103,16 +103,21 @@ class NumericalTokenizerOptBin(BaseTokenizer):
                 vals = _np.asarray(v, dtype="float64")
         else:
             vals = _np.asarray(column_data, dtype="float64")
-        # cuDF to_frame → DataFrame 时 vals 可能是 2D (n,1)；统一展平成 1D
+        # cuDF DataFrame 输入（to_frame 后）vals 是 2D (n,1)；统一展平成 1D
         if vals.ndim == 2:
             vals = vals.reshape(-1, vals.shape[-1])[:, 0]
         elif vals.ndim == 0:
             vals = vals.reshape(1)
 
-        # 2. 读 builder.bin_edges_，归一化成 List[ndarray]（避开 cuML flat 索引 bug）
+        # 2. 读 builder.bin_edges_（缺失则用当下数据兜底 fit）。
+        # 缺失场景：服务器旧 yl_tokenizer.json（在新 serializer 落地前保存的）
+        # 没带 fitted_state.bin_edges → from_file 时 builder 还是新的、没 fit。
+        # 这里 JIT-fit 一次：从当前 tokenize 的列重新学 quantile 边界，
+        # 与 build_vocab 里 fit 阶段的行为一致；词表大小仍以 self.num_bins 为准。
+        if getattr(self.builder, "bin_edges_", None) is None:
+            self._jit_fit(vals)
         bin_edges = _normalize_bin_edges(self.builder.bin_edges_)
         # 单特征 KBinsDiscretizer（这是我们的情况——只 tokenize 一个数值列）：
-        # edges = bin_edges[0]，rxjs 风格 [1:] 对齐 sklearn transformer 的 off-by-one
         edges_for_this = bin_edges[0]
         # NaN → 落到桶 0；按 sklearn 规则 digitize(vals+eps, edges[1:]) 然后 clip。
         eps = 1e-8
@@ -139,6 +144,25 @@ class NumericalTokenizerOptBin(BaseTokenizer):
             return token_strs
         _from_pandas = getattr(cudf.Series, "from_pandas", None)
         return _from_pandas(token_strs) if _from_pandas else cudf.Series(token_strs)
+
+    def _jit_fit(self, vals: "np.ndarray") -> None:
+        """bin_edges_ 缺失时用当下数据兜底 fit。用于兼容旧 yl_tokenizer.json
+        （新 serializer 落地前生成的 state 没带 bin_edges → builder 没恢复）。
+
+        学到的边界可能与 train split 时的略有偏差，但仅影响 Route C 单笔 txn
+        的 amount 桶；不会影响 Route A 训练（那边走 corpus text，不经此路径）。
+        """
+        import numpy as _np
+        clean = vals[~_np.isnan(vals)]
+        if len(clean) == 0:
+            clean = _np.array([0.0, 1.0])
+        try:
+            # 优先用 cuML/sklearn builder.fit 自带的逻辑（保证 bin_edges_ 形态一致）
+            self.builder.fit(_np.asarray(clean).reshape(-1, 1))
+        except Exception:
+            # 极端回退：手算 quantile 边界
+            qs = _np.linspace(0, 1, self.num_bins + 1)
+            self.builder.bin_edges_ = _np.quantile(clean, qs)
 
 
 def _normalize_bin_edges(bin_edges_) -> list:
@@ -200,23 +224,35 @@ def _normalize_bin_edges(bin_edges_) -> list:
         }
 
     def _set_fitted_state(self, state: dict) -> None:
-        # 缺 bin_edges（旧 state 兼容）：仅标记 vocab built，但 builder 仍未 fit，
-        # amount 列 transform 仍会 NotFittedError。新 state 走完整重建。
+        # 缺 bin_edges（旧 state 兼容）：仅标记 vocab built，但 builder 仍未 fit。
+        # tokenize() 现在会在 bin_edges_ 缺失时 _jit_fit 重新补上，所以这条
+        # "残缺 state 路径"也能跑通——但更好做法是 step_02 --force 重新保存。
+        import logging as _logging
         import numpy as _np
+        _log = _logging.getLogger(__name__)
         edges_raw = state.get("bin_edges")
         if edges_raw is not None:
             # 还原成 List[ndarray]（sklearn/cuML 都接受的 bin_edges_ 形态）
             rows = [_np.asarray(r, dtype="float64") for r in edges_raw]
-            try:
-                self.builder.bin_edges_ = (
-                    _np.array(rows, dtype=object) if len(rows) > 1 else rows[0]
-                )
-            except Exception:
-                # 只读属性 / 形状不匹配：直接 list 赋，transform 路径用容器访问也能跑
+            assigned = False
+            for assignment in (
+                lambda: (_np.array(rows, dtype=object) if len(rows) > 1 else rows[0]),
+                lambda: rows,
+                lambda: rows[0],
+            ):
                 try:
-                    self.builder.bin_edges_ = rows
+                    self.builder.bin_edges_ = assignment()
+                    assigned = True
+                    break
                 except Exception:
-                    pass
+                    continue
+            if not assigned:
+                # 不再 except:pass 静默——让 from_file 露出问题，由 tokenize 的 _jit_fit 兜
+                _log.warning(
+                    "NumericalTokenizerOptBin: builder.bin_edges_ 赋值失败"
+                    "（只读属性/形态不匹配），tokenize 阶段会用数据 JIT-fit 重建。"
+                    " 建议重跑 step_02 --force 让 serializer 重新保存。"
+                )
             # n_bins_：每特征实际 bin 数（n_per_feat 优先；否则按 edges 推算）
             n_per_feat = state.get("n_per_feat")
             try:
@@ -227,7 +263,7 @@ def _normalize_bin_edges(bin_edges_) -> list:
                         [len(r) - 1 for r in rows], dtype="int64"
                     )
             except Exception:
-                pass
+                pass  # n_bins_ 冗余，不影响 transform
         self._vocab_built = state.get("_vocab_built", False)
 
 
